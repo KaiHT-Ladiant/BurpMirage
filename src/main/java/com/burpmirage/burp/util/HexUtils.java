@@ -110,13 +110,22 @@ public final class HexUtils {
                 lineBytes.add((byte) Integer.parseInt(m.group(1), 16));
             }
             if (asciiPart != null && !lineBytes.isEmpty()) {
-                int n = Math.min(asciiPart.length(), lineBytes.size());
-                for (int i = 0; i < n; i++) {
-                    char c = asciiPart.charAt(i);
-                    // '.' in dump means "non-printable placeholder" — keep hex byte
-                    if (c != '.') {
-                        lineBytes.set(i, (byte) (c & 0xFF));
+                // Overwrite mode: ASCII column is 1:1 with hex bytes on this line.
+                // Shorter ASCII (user deleted chars) → remaining bytes become 0x00 (not "keep old hex").
+                // '.' keeps existing hex only when that hex was already non-printable; otherwise '.' is 0x2E.
+                // For explicit clear-to-null, prefer deleting (shorter column) or editing HEX to 00.
+                for (int i = 0; i < lineBytes.size(); i++) {
+                    if (i >= asciiPart.length()) {
+                        lineBytes.set(i, (byte) 0);
+                        continue;
                     }
+                    char c = asciiPart.charAt(i);
+                    int prev = lineBytes.get(i) & 0xFF;
+                    if (c == '.' && (prev < 0x20 || prev >= 0x7F)) {
+                        // placeholder for existing non-printable — keep hex
+                        continue;
+                    }
+                    lineBytes.set(i, (byte) (c & 0xFF));
                 }
             }
             bytes.addAll(lineBytes);
@@ -126,6 +135,59 @@ public final class HexUtils {
             out[i] = bytes.get(i);
         }
         return out;
+    }
+
+    /**
+     * Parse hex-dump hex columns only (ignore ASCII column). Used when the user is
+     * editing HEX digits so the ASCII column cannot overwrite their changes.
+     */
+    public static byte[] fromHexDumpHexOnly(String dump) {
+        if (dump == null || dump.isBlank()) {
+            return new byte[0];
+        }
+        String trimmed = dump.trim();
+        if (!trimmed.contains("\n") && trimmed.matches("(?i)^[0-9a-f\\s]+$")) {
+            return fromContinuousHex(trimmed);
+        }
+        List<Byte> bytes = new ArrayList<>();
+        Pattern hexByte = Pattern.compile("\\b([0-9A-Fa-f]{2})\\b");
+        for (String line : dump.split("\\R")) {
+            if (line.isBlank()) {
+                continue;
+            }
+            String content = line.replaceFirst("^\\s*[0-9A-Fa-f]{4,8}\\s+", "");
+            int sep = content.indexOf(" |");
+            String hexPart = sep >= 0 ? content.substring(0, sep) : content;
+            Matcher m = hexByte.matcher(hexPart);
+            while (m.find()) {
+                bytes.add((byte) Integer.parseInt(m.group(1), 16));
+            }
+        }
+        byte[] out = new byte[bytes.size()];
+        for (int i = 0; i < bytes.size(); i++) {
+            out[i] = bytes.get(i);
+        }
+        return out;
+    }
+
+    /** True if caret sits in the ASCII column of a hex-dump line ({@code " |...|"}). */
+    public static boolean isDumpCaretInAsciiColumn(String dump, int caret) {
+        if (dump == null || caret < 0) {
+            return false;
+        }
+        int safe = Math.min(caret, dump.length());
+        int lineStart = dump.lastIndexOf('\n', Math.max(0, safe - 1)) + 1;
+        int lineEnd = dump.indexOf('\n', safe);
+        if (lineEnd < 0) {
+            lineEnd = dump.length();
+        }
+        String line = dump.substring(lineStart, lineEnd);
+        int sep = line.indexOf(" |");
+        if (sep < 0) {
+            return false;
+        }
+        int asciiStart = lineStart + sep + 2;
+        return safe >= asciiStart;
     }
 
     public static String toAsciiPreview(byte[] data, int max) {
