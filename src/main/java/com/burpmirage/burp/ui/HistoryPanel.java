@@ -36,20 +36,25 @@ import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Set;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Consumer;
 
 /**
- * Packet history with Edited marker, highlight search, request/response pairing,
- * Original/Edited viewer, and column sorting.
+ * Packet history with Edited marker, manual/row highlight, search tint,
+ * request/response pairing, Original/Edited viewer, and column sorting.
  */
 public final class HistoryPanel extends JPanel {
     private static final DateTimeFormatter TS =
             DateTimeFormatter.ofPattern("HH:mm:ss.SSS").withZone(ZoneId.systemDefault());
 
+    /** Manual highlight (right-click → Highlight). */
     private static final Color HIGHLIGHT_BG = new Color(0xFF, 0xF3, 0x9A);
+    /** Search-query tint (weaker than manual highlight). */
+    private static final Color SEARCH_BG = new Color(0xE8, 0xF5, 0xE9);
     private static final Color PAIR_BG = new Color(0xD6, 0xEA, 0xFF);
     private static final Color EDITED_BG = new Color(0xFF, 0xF3, 0xE0);
     private static final Color EDITED_FG = new Color(0xB0, 0x40, 0x00);
@@ -75,9 +80,10 @@ public final class HistoryPanel extends JPanel {
     private final JRadioButton viewEdited = new JRadioButton(I18n.get("history.view.edited"), true);
     private final JRadioButton viewOriginal = new JRadioButton(I18n.get("history.view.original"));
     private final JLabel detailMeta = new JLabel(" ");
-    private final JTextField highlightField = new JTextField(18);
+    private final JTextField searchField = new JTextField(18);
     private final AtomicInteger pairSeq = new AtomicInteger();
-    private String highlightQuery = "";
+    private final Set<String> highlightedIds = new HashSet<>();
+    private String searchQuery = "";
     private String focusPairId = null;
 
     public HistoryPanel(HistoryStore history, Consumer<InterceptedPacket> sendToRepeater) {
@@ -113,7 +119,7 @@ public final class HistoryPanel extends JPanel {
             }
         };
         table = new JTable(model);
-        table.setSelectionMode(ListSelectionModel.SINGLE_SELECTION);
+        table.setSelectionMode(ListSelectionModel.MULTIPLE_INTERVAL_SELECTION);
         table.setAutoCreateRowSorter(false);
         sorter = new TableRowSorter<>(model);
         sorter.setComparator(COL_NUM, Comparator.comparingInt(o -> (Integer) o));
@@ -139,8 +145,11 @@ public final class HistoryPanel extends JPanel {
                 boolean editedCol = column == COL_EDITED
                         && ("✓".equals(String.valueOf(value)) || "Yes".equalsIgnoreCase(String.valueOf(value)));
                 if (!isSelected) {
-                    if (matchesHighlight(pkt) || matchesHighlightRow(modelRow)) {
+                    if (pkt != null && highlightedIds.contains(pkt.id())) {
                         c.setBackground(HIGHLIGHT_BG);
+                        c.setForeground(table.getForeground());
+                    } else if (matchesSearch(pkt) || matchesSearchRow(modelRow)) {
+                        c.setBackground(SEARCH_BG);
                         c.setForeground(table.getForeground());
                     } else if (pkt != null && focusPairId != null && focusPairId.equals(pkt.pairId())) {
                         c.setBackground(PAIR_BG);
@@ -177,14 +186,27 @@ public final class HistoryPanel extends JPanel {
         JPopupMenu historyMenu = new JPopupMenu();
         JMenuItem sendRep = new JMenuItem(I18n.get("history.to_repeater"));
         sendRep.addActionListener(e -> {
-            InterceptedPacket p = selectedPacket();
-            if (p != null) {
+            for (InterceptedPacket p : selectedPackets()) {
                 sendToRepeater.accept(p);
             }
+        });
+        JMenuItem highlight = new JMenuItem(I18n.get("history.highlight"));
+        highlight.addActionListener(e -> highlightSelected(true));
+        JMenuItem unhighlight = new JMenuItem(I18n.get("history.unhighlight"));
+        unhighlight.addActionListener(e -> highlightSelected(false));
+        JMenuItem clearHighlights = new JMenuItem(I18n.get("history.clear_highlights"));
+        clearHighlights.addActionListener(e -> {
+            highlightedIds.clear();
+            table.repaint();
         });
         JMenuItem jumpPair = new JMenuItem(I18n.get("history.jump_pair"));
         jumpPair.addActionListener(e -> jumpToPairMate());
         historyMenu.add(sendRep);
+        historyMenu.addSeparator();
+        historyMenu.add(highlight);
+        historyMenu.add(unhighlight);
+        historyMenu.add(clearHighlights);
+        historyMenu.addSeparator();
         historyMenu.add(jumpPair);
         table.addMouseListener(new MouseAdapter() {
             @Override
@@ -203,7 +225,10 @@ public final class HistoryPanel extends JPanel {
                 }
                 int row = table.rowAtPoint(e.getPoint());
                 if (row >= 0) {
-                    table.setRowSelectionInterval(row, row);
+                    // Keep multi-selection if the clicked row is already selected.
+                    if (!table.isRowSelected(row)) {
+                        table.setRowSelectionInterval(row, row);
+                    }
                     historyMenu.show(table, e.getX(), e.getY());
                 }
             }
@@ -218,12 +243,12 @@ public final class HistoryPanel extends JPanel {
             detail.clear();
             detailMeta.setText(" ");
             focusPairId = null;
+            highlightedIds.clear();
             pairSeq.set(0);
         });
         JButton toRepeater = new JButton(I18n.get("history.to_repeater"));
         toRepeater.addActionListener(e -> {
-            InterceptedPacket p = selectedPacket();
-            if (p != null) {
+            for (InterceptedPacket p : selectedPackets()) {
                 sendToRepeater.accept(p);
             }
         });
@@ -233,10 +258,10 @@ public final class HistoryPanel extends JPanel {
         JButton showAll = new JButton(I18n.get("history.show_all"));
         showAll.addActionListener(e -> sorter.setRowFilter(null));
 
-        highlightField.putClientProperty("JTextField.placeholderText", I18n.get("history.highlight_hint"));
-        highlightField.getDocument().addDocumentListener(new DocumentListener() {
+        searchField.putClientProperty("JTextField.placeholderText", I18n.get("history.search_hint"));
+        searchField.getDocument().addDocumentListener(new DocumentListener() {
             private void upd() {
-                highlightQuery = highlightField.getText() == null ? "" : highlightField.getText().trim();
+                searchQuery = searchField.getText() == null ? "" : searchField.getText().trim();
                 table.repaint();
             }
 
@@ -260,8 +285,8 @@ public final class HistoryPanel extends JPanel {
         toolbar.add(toRepeater);
         toolbar.add(editedOnly);
         toolbar.add(showAll);
-        toolbar.add(new JLabel(I18n.get("history.highlight")));
-        toolbar.add(highlightField);
+        toolbar.add(new JLabel(I18n.get("history.search")));
+        toolbar.add(searchField);
         toolbar.add(new JLabel(I18n.get("history.sort_hint")));
 
         ButtonGroup viewGroup = new ButtonGroup();
@@ -385,11 +410,34 @@ public final class HistoryPanel extends JPanel {
         }
     }
 
-    private boolean matchesHighlight(InterceptedPacket pkt) {
-        if (highlightQuery == null || highlightQuery.isBlank() || pkt == null) {
+    private void highlightSelected(boolean on) {
+        for (InterceptedPacket p : selectedPackets()) {
+            if (on) {
+                highlightedIds.add(p.id());
+            } else {
+                highlightedIds.remove(p.id());
+            }
+        }
+        table.repaint();
+    }
+
+    private List<InterceptedPacket> selectedPackets() {
+        List<InterceptedPacket> out = new ArrayList<>();
+        int[] viewRows = table.getSelectedRows();
+        for (int viewRow : viewRows) {
+            int modelRow = table.convertRowIndexToModel(viewRow);
+            if (modelRow >= 0 && modelRow < rows.size()) {
+                out.add(rows.get(modelRow));
+            }
+        }
+        return out;
+    }
+
+    private boolean matchesSearch(InterceptedPacket pkt) {
+        if (searchQuery == null || searchQuery.isBlank() || pkt == null) {
             return false;
         }
-        String q = highlightQuery.toLowerCase(Locale.ROOT);
+        String q = searchQuery.toLowerCase(Locale.ROOT);
         String preview = HexUtils.toAsciiPreview(pkt.data(), 200).toLowerCase(Locale.ROOT);
         String peer = pkt.peer() == null ? "" : pkt.peer().toLowerCase(Locale.ROOT);
         String api = pkt.apiName() == null ? "" : pkt.apiName().toLowerCase(Locale.ROOT);
@@ -397,11 +445,11 @@ public final class HistoryPanel extends JPanel {
         return preview.contains(q) || peer.contains(q) || api.contains(q) || pair.contains(q);
     }
 
-    private boolean matchesHighlightRow(int modelRow) {
-        if (highlightQuery == null || highlightQuery.isBlank() || modelRow < 0) {
+    private boolean matchesSearchRow(int modelRow) {
+        if (searchQuery == null || searchQuery.isBlank() || modelRow < 0) {
             return false;
         }
-        String q = highlightQuery.toLowerCase(Locale.ROOT);
+        String q = searchQuery.toLowerCase(Locale.ROOT);
         for (int c = 0; c < model.getColumnCount(); c++) {
             Object v = model.getValueAt(modelRow, c);
             if (v != null && v.toString().toLowerCase(Locale.ROOT).contains(q)) {
