@@ -14,6 +14,10 @@ import javax.swing.border.EmptyBorder;
 import javax.swing.border.TitledBorder;
 import javax.swing.event.DocumentEvent;
 import javax.swing.event.DocumentListener;
+import javax.swing.text.AbstractDocument;
+import javax.swing.text.AttributeSet;
+import javax.swing.text.BadLocationException;
+import javax.swing.text.DocumentFilter;
 import java.awt.BorderLayout;
 import java.awt.Dimension;
 import java.awt.Font;
@@ -22,6 +26,8 @@ import java.util.function.Consumer;
 
 /**
  * Dual-pane Hex dump + continuous hex / ASCII editor.
+ * Edited payload length is locked to the buffer size loaded via {@link #setData(byte[])}
+ * (in-place Winsock hooks cannot grow the original buffer).
  */
 public final class HexEditorPanel extends JPanel {
     private enum EditSource { DUMP, CONTINUOUS, ASCII }
@@ -32,8 +38,11 @@ public final class HexEditorPanel extends JPanel {
     private final JTextField searchField = new JTextField(12);
     private final JTextField replaceField = new JTextField(12);
     private final JTextField metaField = new JTextField();
+    private final JLabel lengthLockLabel = new JLabel(" ");
 
     private byte[] data = new byte[0];
+    /** Fixed byte length; -1 means unlocked (empty / cleared). */
+    private int lockedLength = -1;
     private Consumer<byte[]> changeListener = b -> {};
     private EditSource lastEdit = EditSource.DUMP;
     private boolean refreshing;
@@ -60,6 +69,7 @@ public final class HexEditorPanel extends JPanel {
         metaField.setEditable(false);
         metaField.setBorder(new TitledBorder("Info"));
         metaField.setFont(mono.deriveFont(11f));
+        lengthLockLabel.setFont(mono.deriveFont(Font.PLAIN, 11f));
 
         JPanel tools = new JPanel(new java.awt.FlowLayout(java.awt.FlowLayout.LEFT, 6, 2));
         tools.add(new JLabel("Find:"));
@@ -72,6 +82,7 @@ public final class HexEditorPanel extends JPanel {
         JButton syncBtn = new JButton("Apply Edits");
         syncBtn.addActionListener(e -> applyFromEditors());
         tools.add(syncBtn);
+        tools.add(lengthLockLabel);
 
         JPanel north = new JPanel(new BorderLayout(0, 4));
         north.add(tools, BorderLayout.NORTH);
@@ -96,9 +107,68 @@ public final class HexEditorPanel extends JPanel {
             add(main, BorderLayout.CENTER);
         }
 
+        installLengthFilters();
         dumpArea.getDocument().addDocumentListener(track(EditSource.DUMP));
         continuousArea.getDocument().addDocumentListener(track(EditSource.CONTINUOUS));
         asciiArea.getDocument().addDocumentListener(track(EditSource.ASCII));
+    }
+
+    private void installLengthFilters() {
+        ((AbstractDocument) continuousArea.getDocument()).setDocumentFilter(new DocumentFilter() {
+            @Override
+            public void insertString(FilterBypass fb, int offset, String string, AttributeSet attr)
+                    throws BadLocationException {
+                if (string == null) {
+                    return;
+                }
+                replace(fb, offset, 0, string, attr);
+            }
+
+            @Override
+            public void replace(FilterBypass fb, int offset, int length, String text, AttributeSet attrs)
+                    throws BadLocationException {
+                if (refreshing || lockedLength < 0) {
+                    super.replace(fb, offset, length, text, attrs);
+                    return;
+                }
+                String incoming = text == null ? "" : text;
+                String current = fb.getDocument().getText(0, fb.getDocument().getLength());
+                String next = current.substring(0, offset) + incoming + current.substring(offset + length);
+                String cleaned = next.replaceAll("[^0-9A-Fa-f]", "");
+                int maxHexChars = lockedLength * 2;
+                if (cleaned.length() > maxHexChars) {
+                    // Reject growth beyond locked byte length (hex digits).
+                    return;
+                }
+                super.replace(fb, offset, length, text, attrs);
+            }
+        });
+
+        ((AbstractDocument) asciiArea.getDocument()).setDocumentFilter(new DocumentFilter() {
+            @Override
+            public void insertString(FilterBypass fb, int offset, String string, AttributeSet attr)
+                    throws BadLocationException {
+                if (string == null) {
+                    return;
+                }
+                replace(fb, offset, 0, string, attr);
+            }
+
+            @Override
+            public void replace(FilterBypass fb, int offset, int length, String text, AttributeSet attrs)
+                    throws BadLocationException {
+                if (refreshing || lockedLength < 0) {
+                    super.replace(fb, offset, length, text, attrs);
+                    return;
+                }
+                String incoming = text == null ? "" : text;
+                int nextLen = fb.getDocument().getLength() - length + incoming.length();
+                if (nextLen > lockedLength) {
+                    return;
+                }
+                super.replace(fb, offset, length, text, attrs);
+            }
+        });
     }
 
     private DocumentListener track(EditSource source) {
@@ -132,7 +202,13 @@ public final class HexEditorPanel extends JPanel {
 
     public void setData(byte[] bytes) {
         this.data = bytes != null ? bytes.clone() : new byte[0];
+        this.lockedLength = this.data.length;
+        updateLengthLockLabel();
         refreshViews();
+    }
+
+    public int lockedLength() {
+        return lockedLength;
     }
 
     public byte[] getData() {
@@ -162,6 +238,14 @@ public final class HexEditorPanel extends JPanel {
         return asciiArea;
     }
 
+    private void updateLengthLockLabel() {
+        if (lockedLength < 0) {
+            lengthLockLabel.setText(" ");
+        } else {
+            lengthLockLabel.setText("Length locked: " + lockedLength + " bytes (truncate/pad on apply)");
+        }
+    }
+
     private void refreshViews() {
         refreshing = true;
         try {
@@ -174,6 +258,13 @@ public final class HexEditorPanel extends JPanel {
         } finally {
             refreshing = false;
         }
+    }
+
+    private byte[] fitLocked(byte[] parsed) {
+        if (lockedLength < 0) {
+            return parsed != null ? parsed : new byte[0];
+        }
+        return HexUtils.fitLength(parsed, lockedLength);
     }
 
     private void applyFromEditors() {
@@ -196,7 +287,7 @@ public final class HexEditorPanel extends JPanel {
             }
             default -> parsed = data;
         }
-        data = parsed != null ? parsed : new byte[0];
+        data = fitLocked(parsed);
         refreshViews();
         changeListener.accept(data);
     }
@@ -213,12 +304,14 @@ public final class HexEditorPanel extends JPanel {
         } else {
             data = HexUtils.replaceAscii(data, search, replace == null ? "" : replace);
         }
+        data = fitLocked(data);
         lastEdit = EditSource.DUMP;
         refreshViews();
         changeListener.accept(data);
     }
 
     public void clear() {
+        lockedLength = -1;
         setData(new byte[0]);
         setMeta("");
     }

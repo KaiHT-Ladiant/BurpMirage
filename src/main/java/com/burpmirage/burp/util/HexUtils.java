@@ -185,4 +185,20 @@ public final class HexUtils {
         String hay = new String(data, StandardCharsets.ISO_8859_1).toLowerCase(Locale.ROOT);
         return hay.contains(asciiNeedle.toLowerCase(Locale.ROOT));
     }
+
+    /**
+     * Force {@code input} to exactly {@code length} bytes (truncate or pad with {@code 0x00}).
+     * Used for in-place Winsock hooks that cannot grow the original buffer.
+     */
+    public static byte[] fitLength(byte[] input, int length) {
+        if (length < 0) {
+            return input == null ? new byte[0] : input.clone();
+        }
+        byte[] out = new byte[length];
+        if (input == null || input.length == 0 || length == 0) {
+            return out;
+        }
+        System.arraycopy(input, 0, out, 0, Math.min(input.length, length));
+        return out;
+    }
 }
