@@ -2,6 +2,7 @@ package com.burpmirage.burp.util;
 
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.HexFormat;
 import java.util.List;
 import java.util.Locale;
@@ -209,5 +210,117 @@ public final class HexUtils {
         }
         System.arraycopy(input, 0, out, 0, Math.min(input.length, length));
         return out;
+    }
+
+    /**
+     * After an in-place string edit (same total buffer size), update length prefixes that
+     * previously matched the old printable-run length so TCP/binary framing stays consistent.
+     * Supports 1 / 2 / 4-byte little- and big-endian fields appearing before each changed run.
+     */
+    public static byte[] syncLengthPrefixes(byte[] before, byte[] after) {
+        if (before == null || after == null || before.length != after.length || before.length == 0) {
+            return after == null ? new byte[0] : after.clone();
+        }
+        if (Arrays.equals(before, after)) {
+            return after.clone();
+        }
+        byte[] out = after.clone();
+        int i = 0;
+        while (i < before.length) {
+            if (before[i] == after[i]) {
+                i++;
+                continue;
+            }
+            int runStart = i;
+            // Expand left to the start of the printable run in the original buffer.
+            while (runStart > 0 && before[runStart - 1] != 0 && isPrintable(before[runStart - 1])) {
+                runStart--;
+            }
+
+            int oldEnd = runStart;
+            while (oldEnd < before.length && before[oldEnd] != 0 && isPrintable(before[oldEnd])) {
+                oldEnd++;
+            }
+            int oldLen = oldEnd - runStart;
+            if (oldLen < 2) {
+                int j = i;
+                while (j < before.length && before[j] != after[j]) {
+                    j++;
+                }
+                i = Math.max(j, i + 1);
+                continue;
+            }
+
+            int newEnd = runStart;
+            while (newEnd < out.length && out[newEnd] != 0 && isPrintable(out[newEnd])) {
+                newEnd++;
+            }
+            int newLen = newEnd - runStart;
+            if (newLen != oldLen) {
+                patchLengthFields(out, runStart, oldLen, newLen);
+            }
+            i = Math.max(oldEnd, i + 1);
+        }
+        return out;
+    }
+
+    private static boolean isPrintable(byte b) {
+        int v = b & 0xFF;
+        return v >= 0x20 && v < 0x7F;
+    }
+
+    /**
+     * Patch u8 / u16 / u32 LE+BE fields in {@code [0, runStart)} that equal {@code oldLen}.
+     */
+    private static void patchLengthFields(byte[] data, int runStart, int oldLen, int newLen) {
+        if (oldLen <= 0 || newLen < 0 || newLen > 0xFFFFFFFFL) {
+            return;
+        }
+        // Prefer fields closest to the string (scan backwards).
+        for (int pos = runStart - 1; pos >= 0; pos--) {
+            // uint8
+            if ((data[pos] & 0xFF) == oldLen && newLen <= 0xFF) {
+                data[pos] = (byte) newLen;
+                return;
+            }
+        }
+        for (int pos = runStart - 2; pos >= 0; pos--) {
+            int le = (data[pos] & 0xFF) | ((data[pos + 1] & 0xFF) << 8);
+            int be = ((data[pos] & 0xFF) << 8) | (data[pos + 1] & 0xFF);
+            if (le == oldLen && newLen <= 0xFFFF) {
+                data[pos] = (byte) (newLen & 0xFF);
+                data[pos + 1] = (byte) ((newLen >> 8) & 0xFF);
+                return;
+            }
+            if (be == oldLen && newLen <= 0xFFFF) {
+                data[pos] = (byte) ((newLen >> 8) & 0xFF);
+                data[pos + 1] = (byte) (newLen & 0xFF);
+                return;
+            }
+        }
+        for (int pos = runStart - 4; pos >= 0; pos--) {
+            long le = (data[pos] & 0xFFL)
+                    | ((data[pos + 1] & 0xFFL) << 8)
+                    | ((data[pos + 2] & 0xFFL) << 16)
+                    | ((data[pos + 3] & 0xFFL) << 24);
+            long be = ((data[pos] & 0xFFL) << 24)
+                    | ((data[pos + 1] & 0xFFL) << 16)
+                    | ((data[pos + 2] & 0xFFL) << 8)
+                    | (data[pos + 3] & 0xFFL);
+            if (le == oldLen) {
+                data[pos] = (byte) (newLen & 0xFF);
+                data[pos + 1] = (byte) ((newLen >> 8) & 0xFF);
+                data[pos + 2] = (byte) ((newLen >> 16) & 0xFF);
+                data[pos + 3] = (byte) ((newLen >> 24) & 0xFF);
+                return;
+            }
+            if (be == oldLen) {
+                data[pos] = (byte) ((newLen >> 24) & 0xFF);
+                data[pos + 1] = (byte) ((newLen >> 16) & 0xFF);
+                data[pos + 2] = (byte) ((newLen >> 8) & 0xFF);
+                data[pos + 3] = (byte) (newLen & 0xFF);
+                return;
+            }
+        }
     }
 }

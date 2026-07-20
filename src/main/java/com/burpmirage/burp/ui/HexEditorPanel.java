@@ -10,6 +10,7 @@ import javax.swing.JSplitPane;
 import javax.swing.JTextArea;
 import javax.swing.JTextField;
 import javax.swing.SwingUtilities;
+import javax.swing.Timer;
 import javax.swing.border.EmptyBorder;
 import javax.swing.border.TitledBorder;
 import javax.swing.event.DocumentEvent;
@@ -26,8 +27,12 @@ import java.util.function.Consumer;
 
 /**
  * Dual-pane Hex dump + continuous hex / ASCII editor.
- * Edited payload length is locked to the buffer size loaded via {@link #setData(byte[])}
- * (in-place Winsock hooks cannot grow the original buffer).
+ * <ul>
+ *   <li>Buffer length is locked to the size loaded via {@link #setData(byte[])}.</li>
+ *   <li>ASCII / dump edits live-sync into HEX views.</li>
+ *   <li>Matching length prefixes (u8/u16/u32) are updated when a string run shrinks/grows
+ *       inside the fixed buffer (null-padded).</li>
+ * </ul>
  */
 public final class HexEditorPanel extends JPanel {
     private enum EditSource { DUMP, CONTINUOUS, ASCII }
@@ -46,6 +51,8 @@ public final class HexEditorPanel extends JPanel {
     private Consumer<byte[]> changeListener = b -> {};
     private EditSource lastEdit = EditSource.DUMP;
     private boolean refreshing;
+    private boolean liveSyncScheduled;
+    private Timer liveSyncTimer;
     private final boolean hexOnly;
 
     public HexEditorPanel() {
@@ -80,7 +87,7 @@ public final class HexEditorPanel extends JPanel {
         applyBtn.addActionListener(e -> applyReplace());
         tools.add(applyBtn);
         JButton syncBtn = new JButton("Apply Edits");
-        syncBtn.addActionListener(e -> applyFromEditors());
+        syncBtn.addActionListener(e -> applyFromEditors(true));
         tools.add(syncBtn);
         tools.add(lengthLockLabel);
 
@@ -90,7 +97,8 @@ public final class HexEditorPanel extends JPanel {
         add(north, BorderLayout.NORTH);
 
         JScrollPane dumpScroll = new JScrollPane(dumpArea);
-        dumpScroll.setBorder(new TitledBorder("Hex Dump — HEX or ASCII column ( |...| ) editable"));
+        dumpScroll.setBorder(new TitledBorder(
+                "Hex Dump — edit HEX or ASCII column; ASCII live-syncs HEX + length fields"));
 
         if (hexOnly) {
             add(dumpScroll, BorderLayout.CENTER);
@@ -98,7 +106,8 @@ public final class HexEditorPanel extends JPanel {
             JScrollPane contScroll = new JScrollPane(continuousArea);
             contScroll.setBorder(new TitledBorder("Continuous Hex"));
             JScrollPane asciiScroll = new JScrollPane(asciiArea);
-            asciiScroll.setBorder(new TitledBorder("ASCII (ISO-8859-1) — string edits apply on Forward/Send"));
+            asciiScroll.setBorder(new TitledBorder(
+                    "ASCII (ISO-8859-1) — live-syncs HEX; length locked / null-padded"));
 
             JSplitPane bottom = new JSplitPane(JSplitPane.VERTICAL_SPLIT, contScroll, asciiScroll);
             bottom.setResizeWeight(0.5);
@@ -108,9 +117,9 @@ public final class HexEditorPanel extends JPanel {
         }
 
         installLengthFilters();
-        dumpArea.getDocument().addDocumentListener(track(EditSource.DUMP));
-        continuousArea.getDocument().addDocumentListener(track(EditSource.CONTINUOUS));
-        asciiArea.getDocument().addDocumentListener(track(EditSource.ASCII));
+        dumpArea.getDocument().addDocumentListener(track(EditSource.DUMP, true));
+        continuousArea.getDocument().addDocumentListener(track(EditSource.CONTINUOUS, true));
+        asciiArea.getDocument().addDocumentListener(track(EditSource.ASCII, true));
     }
 
     private void installLengthFilters() {
@@ -137,7 +146,6 @@ public final class HexEditorPanel extends JPanel {
                 String cleaned = next.replaceAll("[^0-9A-Fa-f]", "");
                 int maxHexChars = lockedLength * 2;
                 if (cleaned.length() > maxHexChars) {
-                    // Reject growth beyond locked byte length (hex digits).
                     return;
                 }
                 super.replace(fb, offset, length, text, attrs);
@@ -171,11 +179,15 @@ public final class HexEditorPanel extends JPanel {
         });
     }
 
-    private DocumentListener track(EditSource source) {
+    private DocumentListener track(EditSource source, boolean liveSync) {
         return new DocumentListener() {
             private void mark() {
-                if (!refreshing) {
-                    lastEdit = source;
+                if (refreshing) {
+                    return;
+                }
+                lastEdit = source;
+                if (liveSync) {
+                    scheduleLiveSync();
                 }
             }
 
@@ -196,6 +208,26 @@ public final class HexEditorPanel extends JPanel {
         };
     }
 
+    private void scheduleLiveSync() {
+        if (refreshing) {
+            return;
+        }
+        // Dump edits debounce so mid-nibble HEX typing is not immediately reformatted.
+        int delayMs = lastEdit == EditSource.DUMP ? 280 : 60;
+        if (liveSyncTimer != null && liveSyncTimer.isRunning()) {
+            liveSyncTimer.stop();
+        }
+        liveSyncTimer = new Timer(delayMs, e -> {
+            liveSyncScheduled = false;
+            if (!refreshing) {
+                applyFromEditors(true);
+            }
+        });
+        liveSyncTimer.setRepeats(false);
+        liveSyncScheduled = true;
+        liveSyncTimer.start();
+    }
+
     public void setChangeListener(Consumer<byte[]> changeListener) {
         this.changeListener = changeListener != null ? changeListener : b -> {};
     }
@@ -204,7 +236,7 @@ public final class HexEditorPanel extends JPanel {
         this.data = bytes != null ? bytes.clone() : new byte[0];
         this.lockedLength = this.data.length;
         updateLengthLockLabel();
-        refreshViews();
+        refreshViews(0);
     }
 
     public int lockedLength() {
@@ -212,7 +244,7 @@ public final class HexEditorPanel extends JPanel {
     }
 
     public byte[] getData() {
-        applyFromEditors();
+        applyFromEditors(true);
         return data.clone();
     }
 
@@ -242,19 +274,24 @@ public final class HexEditorPanel extends JPanel {
         if (lockedLength < 0) {
             lengthLockLabel.setText(" ");
         } else {
-            lengthLockLabel.setText("Length locked: " + lockedLength + " bytes (truncate/pad on apply)");
+            lengthLockLabel.setText("Length locked: " + lockedLength
+                    + " bytes · ASCII→HEX live · length-prefix sync");
         }
     }
 
-    private void refreshViews() {
+    private void refreshViews(int preferredCaret) {
         refreshing = true;
         try {
-            dumpArea.setText(HexUtils.toHexDump(data));
+            String dump = HexUtils.toHexDump(data);
+            dumpArea.setText(dump);
             continuousArea.setText(HexUtils.toContinuousHex(data));
             asciiArea.setText(new String(data, StandardCharsets.ISO_8859_1));
-            dumpArea.setCaretPosition(0);
+            int caret = Math.max(0, Math.min(preferredCaret, dump.length()));
+            dumpArea.setCaretPosition(caret);
             continuousArea.setCaretPosition(0);
-            asciiArea.setCaretPosition(0);
+            asciiArea.setCaretPosition(Math.min(
+                    preferredCaret,
+                    asciiArea.getDocument().getLength()));
         } finally {
             refreshing = false;
         }
@@ -267,7 +304,9 @@ public final class HexEditorPanel extends JPanel {
         return HexUtils.fitLength(parsed, lockedLength);
     }
 
-    private void applyFromEditors() {
+    private void applyFromEditors(boolean syncPrefixes) {
+        int caret = dumpArea.getCaretPosition();
+        byte[] previous = data.clone();
         byte[] parsed;
         if (hexOnly) {
             lastEdit = EditSource.DUMP;
@@ -287,13 +326,18 @@ public final class HexEditorPanel extends JPanel {
             }
             default -> parsed = data;
         }
-        data = fitLocked(parsed);
-        refreshViews();
+        parsed = fitLocked(parsed);
+        if (syncPrefixes) {
+            parsed = HexUtils.syncLengthPrefixes(previous, parsed);
+        }
+        data = parsed;
+        refreshViews(caret);
         changeListener.accept(data);
     }
 
     private void applyReplace() {
-        applyFromEditors();
+        applyFromEditors(true);
+        byte[] previous = data.clone();
         String search = searchField.getText();
         String replace = replaceField.getText();
         if (search == null || search.isEmpty()) {
@@ -305,8 +349,9 @@ public final class HexEditorPanel extends JPanel {
             data = HexUtils.replaceAscii(data, search, replace == null ? "" : replace);
         }
         data = fitLocked(data);
+        data = HexUtils.syncLengthPrefixes(previous, data);
         lastEdit = EditSource.DUMP;
-        refreshViews();
+        refreshViews(0);
         changeListener.accept(data);
     }
 

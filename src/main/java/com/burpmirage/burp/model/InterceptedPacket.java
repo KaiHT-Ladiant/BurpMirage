@@ -19,6 +19,8 @@ public final class InterceptedPacket {
     private byte[] data;
     private byte[] originalData;
     private volatile PacketStatus status;
+    /** Shared id linking a SEND request with its following RECV response (same channel). */
+    private volatile String pairId;
 
     public enum PacketStatus {
         PENDING,
@@ -50,6 +52,7 @@ public final class InterceptedPacket {
         this.data = data != null ? Arrays.copyOf(data, data.length) : new byte[0];
         this.originalData = Arrays.copyOf(this.data, this.data.length);
         this.status = PacketStatus.PENDING;
+        this.pairId = null;
     }
 
     public static InterceptedPacket create(
@@ -128,6 +131,14 @@ public final class InterceptedPacket {
 
     public void setStatus(PacketStatus status) {
         this.status = status;
+    }
+
+    public String pairId() {
+        return pairId;
+    }
+
+    public void setPairId(String pairId) {
+        this.pairId = pairId;
     }
 
     public int length() {
