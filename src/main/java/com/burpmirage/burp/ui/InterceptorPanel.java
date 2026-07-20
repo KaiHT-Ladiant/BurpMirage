@@ -86,8 +86,11 @@ public final class InterceptorPanel extends JPanel {
         toRepeater.addActionListener(e -> doSendToRepeater());
         applyPattern.addActionListener(e -> {
             if (current == null) return;
-            byte[] next = controller.applySearchReplace(hexEditor.getData());
+            byte[] next = controller.applySearchReplace(current.originalData(), hexEditor.getData());
             hexEditor.setData(next);
+            hexEditor.setMeta(I18n.format("intercept.original_ascii",
+                    HexUtils.toAsciiPreview(current.originalData(), 120))
+                    + "  |  logical len=" + HexUtils.logicalWireLength(current.originalData(), next));
         });
         buttons.add(applyPattern);
         buttons.add(toRepeater);
@@ -211,7 +214,11 @@ public final class InterceptorPanel extends JPanel {
             return;
         }
         byte[] edited = hexEditor.getData();
-        controller.forwardCurrent(edited);
+        byte[] prepared = HexUtils.applyLogicalLength(current.originalData(), edited);
+        // Reflect length fields in HEX before delivery; send logical wire length to Frida.
+        hexEditor.setData(prepared);
+        byte[] wire = HexUtils.forWireDelivery(current.originalData(), prepared);
+        controller.forwardCurrent(wire);
         clearView();
     }
 

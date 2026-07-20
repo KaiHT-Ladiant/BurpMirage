@@ -172,15 +172,16 @@ public final class InterceptController {
         }
     }
 
-    public byte[] applySearchReplace(byte[] data) {
+    public byte[] applySearchReplace(byte[] original, byte[] data) {
         if (data == null) {
             return new byte[0];
         }
-        int locked = data.length;
+        byte[] base = original != null ? original : data;
+        int locked = base.length;
         String search = settings.searchPattern();
         String replace = settings.replacePattern();
         if (search == null || search.isBlank()) {
-            return data;
+            return HexUtils.applyLogicalLength(base, data);
         }
         byte[] next;
         if (search.matches("(?i)^[0-9a-f\\s]+$") && search.replaceAll("\\s", "").length() >= 2) {
@@ -188,7 +189,8 @@ public final class InterceptController {
         } else {
             next = HexUtils.replaceAscii(data, search, replace);
         }
-        return HexUtils.fitLength(next, locked);
+        next = HexUtils.fitLength(next, locked);
+        return HexUtils.applyLogicalLength(base, next);
     }
 
     public PacketQueue queue() {

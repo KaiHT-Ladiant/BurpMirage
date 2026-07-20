@@ -19,7 +19,7 @@ public final class InterceptedPacket {
     private byte[] data;
     private byte[] originalData;
     private volatile PacketStatus status;
-    /** Shared id linking a SEND request with its following RECV response (same channel). */
+    /** Shared id linking a SEND with its RECV response(s) on the same channel (FIFO + multi-recv). */
     private volatile String pairId;
 
     public enum PacketStatus {

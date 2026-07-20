@@ -162,6 +162,10 @@ function applyInPlace(buf, capacity, decision) {
   if (decision.data && decision.data.length !== undefined) {
     var n = Math.min(decision.data.length, capacity);
     writeBytes(buf, decision.data.slice(0, n));
+    // Clear stale bytes past the logical wire length.
+    for (var i = n; i < capacity; i++) {
+      buf.add(i).writeU8(0);
+    }
     return { drop: false, length: n, fullLength: decision.data.length };
   }
   return { drop: false, length: capacity };
@@ -362,8 +366,13 @@ function install() {
         var buf = wsabufPtr(lpBuffers);
         var decision = requestDecision('send', 'WSASend', this.s, buf, len);
         this.drop = decision && decision.action === 'drop';
+        this.lpBuffers = lpBuffers;
         if (!this.drop && decision && decision.data) {
-          applyInPlace(buf, len, decision);
+          var applied = applyInPlace(buf, len, decision);
+          // Reflect logical length in WSABUF.len (same as send/sendto args[2]).
+          if (applied && !applied.drop) {
+            lpBuffers.writeU32(applied.length);
+          }
         }
       },
       onLeave: function (retval) {

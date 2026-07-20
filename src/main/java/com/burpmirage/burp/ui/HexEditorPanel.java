@@ -417,7 +417,7 @@ public final class HexEditorPanel extends JPanel {
         }
         parsed = fitLocked(parsed);
         if (syncPrefixes) {
-            parsed = HexUtils.syncLengthPrefixes(previous, parsed);
+            parsed = HexUtils.applyLogicalLength(previous, parsed);
         }
         if (Arrays.equals(previous, parsed)) {
             // Still refresh so HEX/ASCII/continuous panes stay visually in sync.
@@ -483,7 +483,7 @@ public final class HexEditorPanel extends JPanel {
             next = HexUtils.replaceAscii(data, search, replace == null ? "" : replace);
         }
         next = fitLocked(next);
-        next = HexUtils.syncLengthPrefixes(previous, next);
+        next = HexUtils.applyLogicalLength(previous, next);
         if (!Arrays.equals(previous, next)) {
             pushUndo(previous);
             data = next;

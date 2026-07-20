@@ -348,7 +348,8 @@ public final class HistoryPanel extends JPanel {
         if (packet.direction() != PacketDirection.RECV || packet.pairId() != null) {
             return;
         }
-        for (int i = rows.size() - 1; i >= 0; i--) {
+        // FIFO: oldest unpaired SEND on the same channel (pipelined requests).
+        for (int i = 0; i < rows.size(); i++) {
             InterceptedPacket prev = rows.get(i);
             if (prev.direction() != PacketDirection.SEND) {
                 continue;
@@ -364,21 +365,69 @@ public final class HistoryPanel extends JPanel {
             packet.setPairId(id);
             return;
         }
+        // Multi-RECV: attach further responses to the most recent paired SEND on this channel.
+        for (int i = rows.size() - 1; i >= 0; i--) {
+            InterceptedPacket prev = rows.get(i);
+            if (prev.direction() != PacketDirection.SEND || prev.pairId() == null) {
+                continue;
+            }
+            if (!sameChannel(prev, packet)) {
+                continue;
+            }
+            long gapMs = Math.abs(packet.timestamp().toEpochMilli() - prev.timestamp().toEpochMilli());
+            if (gapMs > 60_000L) {
+                break;
+            }
+            packet.setPairId(prev.pairId());
+            return;
+        }
     }
 
+    /**
+     * Channel match priority: identical socket fd (strict) → peer host:port →
+     * same process only when both fd/peer are unavailable.
+     */
     private static boolean sameChannel(InterceptedPacket a, InterceptedPacket b) {
-        if (a.socketFd() > 0 && a.socketFd() == b.socketFd()) {
-            return true;
+        boolean aFd = a.socketFd() > 0;
+        boolean bFd = b.socketFd() > 0;
+        if (aFd && bFd) {
+            return a.socketFd() == b.socketFd();
         }
         String pa = a.peer() == null ? "" : a.peer().trim();
         String pb = b.peer() == null ? "" : b.peer().trim();
-        if (!pa.isEmpty() && pa.equalsIgnoreCase(pb)) {
+        boolean peerOk = !pa.isEmpty() && pa.equalsIgnoreCase(pb)
+                && !pa.regionMatches(true, 0, "fd:", 0, 3);
+        if (peerOk) {
             return true;
         }
-        // Same process fallback when peer/fd unknown
+        // fd:N peer strings — only match when the numeric fd agrees.
+        Integer fa = parseFdPeer(pa);
+        Integer fb = parseFdPeer(pb);
+        if (fa != null && fa.equals(fb)) {
+            return true;
+        }
+        if (aFd || bFd) {
+            return false;
+        }
         return a.pid() > 0 && a.pid() == b.pid()
                 && a.processName() != null
+                && !a.processName().isBlank()
                 && a.processName().equalsIgnoreCase(b.processName());
+    }
+
+    private static Integer parseFdPeer(String peer) {
+        if (peer == null || peer.length() < 4) {
+            return null;
+        }
+        if (!peer.regionMatches(true, 0, "fd:", 0, 3)) {
+            return null;
+        }
+        try {
+            int fd = Integer.parseInt(peer.substring(3).trim());
+            return fd > 0 ? fd : null;
+        } catch (NumberFormatException e) {
+            return null;
+        }
     }
 
     private void refreshPairColumn(String pairId) {

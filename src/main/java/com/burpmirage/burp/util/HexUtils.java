@@ -275,6 +275,66 @@ public final class HexUtils {
     }
 
     /**
+     * Fit to original capacity, sync length fields into HEX, ready for UI / delivery prep.
+     */
+    public static byte[] applyLogicalLength(byte[] original, byte[] edited) {
+        if (original == null) {
+            original = new byte[0];
+        }
+        if (edited == null) {
+            edited = new byte[0];
+        }
+        byte[] fitted = fitLength(edited, original.length);
+        byte[] synced = syncLengthPrefixes(original, fitted);
+        return syncLeadingFrameLength(original, synced);
+    }
+
+    /**
+     * Wire length to hand to Winsock ({@code send}/{@code recv} len) after logical edits.
+     * Prefers a leading frame-length field; otherwise trims trailing {@code 0x00} introduced
+     * by shortening content; never exceeds buffer capacity.
+     */
+    public static int logicalWireLength(byte[] original, byte[] prepared) {
+        if (prepared == null || prepared.length == 0) {
+            return 0;
+        }
+        int fromFrame = inferWireLengthFromLeadingFields(prepared);
+        if (fromFrame > 0 && fromFrame <= prepared.length) {
+            return fromFrame;
+        }
+        if (original == null || original.length != prepared.length) {
+            return prepared.length;
+        }
+        if (Arrays.equals(original, prepared)) {
+            return prepared.length;
+        }
+        int contentEnd = endExcludingTrailingZeros(prepared);
+        int origEnd = endExcludingTrailingZeros(original);
+        // Shortened payload left trailing 0x00 padding inside the locked buffer.
+        if (contentEnd > 0 && contentEnd < prepared.length && contentEnd <= origEnd
+                && trailingZerosOnly(prepared, contentEnd)) {
+            return Math.max(contentEnd, 1);
+        }
+        return prepared.length;
+    }
+
+    /** Truncate {@code prepared} to {@link #logicalWireLength}. */
+    public static byte[] forWireDelivery(byte[] original, byte[] prepared) {
+        if (prepared == null) {
+            return new byte[0];
+        }
+        byte[] synced = prepared;
+        if (original != null && original.length == prepared.length) {
+            synced = applyLogicalLength(original, prepared);
+        }
+        int n = logicalWireLength(original == null ? synced : original, synced);
+        if (n >= synced.length) {
+            return synced;
+        }
+        return Arrays.copyOf(synced, Math.max(n, 0));
+    }
+
+    /**
      * After an in-place string edit (same total buffer size), update length prefixes that
      * previously matched the old printable-run length so TCP/binary framing stays consistent.
      * Supports 1 / 2 / 4-byte little- and big-endian fields appearing before each changed run.
@@ -326,41 +386,76 @@ public final class HexUtils {
         return out;
     }
 
-    private static boolean isPrintable(byte b) {
-        int v = b & 0xFF;
-        return v >= 0x20 && v < 0x7F;
-    }
-
     /**
-     * Patch u8 / u16 / u32 LE+BE fields in {@code [0, runStart)} that equal {@code oldLen}.
+     * If a leading u8/u16/u32 field encoded the old total (or total−header) frame size,
+     * rewrite it to the new logical content end so HEX reflects the delivery length.
      */
-    private static void patchLengthFields(byte[] data, int runStart, int oldLen, int newLen) {
-        if (oldLen <= 0 || newLen < 0 || newLen > 0xFFFFFFFFL) {
-            return;
+    static byte[] syncLeadingFrameLength(byte[] original, byte[] synced) {
+        if (original == null || synced == null || original.length != synced.length || synced.length == 0) {
+            return synced == null ? new byte[0] : synced.clone();
         }
-        // Prefer fields closest to the string (scan backwards).
-        for (int pos = runStart - 1; pos >= 0; pos--) {
-            // uint8
-            if ((data[pos] & 0xFF) == oldLen && newLen <= 0xFF) {
-                data[pos] = (byte) newLen;
-                return;
+        int oldTotal = original.length;
+        int newTotal = endExcludingTrailingZeros(synced);
+        if (newTotal <= 0 || newTotal >= oldTotal) {
+            // Still try when content end equals full buffer but payload length field changed.
+            newTotal = synced.length;
+        }
+        if (newTotal == oldTotal && Arrays.equals(original, synced)) {
+            return synced;
+        }
+        int contentEnd = Math.min(Math.max(endExcludingTrailingZeros(synced), 1), synced.length);
+        byte[] out = synced.clone();
+        // Candidates the leading field might have stored for the original packet.
+        int[] oldCandidates = {
+                oldTotal,
+                oldTotal - 1,
+                oldTotal - 2,
+                oldTotal - 4,
+                endExcludingTrailingZeros(original)
+        };
+        int[] newCandidates = {
+                contentEnd,
+                contentEnd - 1,
+                contentEnd - 2,
+                contentEnd - 4,
+                contentEnd
+        };
+        for (int i = 0; i < oldCandidates.length; i++) {
+            int oldV = oldCandidates[i];
+            int newV = newCandidates[Math.min(i, newCandidates.length - 1)];
+            if (oldV <= 0 || newV <= 0 || newV > synced.length) {
+                continue;
+            }
+            if (tryWriteLengthAt(out, 0, oldV, newV)) {
+                return out;
             }
         }
-        for (int pos = runStart - 2; pos >= 0; pos--) {
+        return out;
+    }
+
+    private static boolean tryWriteLengthAt(byte[] data, int pos, int oldLen, int newLen) {
+        if (pos < 0 || data == null) {
+            return false;
+        }
+        if (pos < data.length && (data[pos] & 0xFF) == oldLen && newLen <= 0xFF) {
+            data[pos] = (byte) newLen;
+            return true;
+        }
+        if (pos + 1 < data.length) {
             int le = (data[pos] & 0xFF) | ((data[pos + 1] & 0xFF) << 8);
             int be = ((data[pos] & 0xFF) << 8) | (data[pos + 1] & 0xFF);
             if (le == oldLen && newLen <= 0xFFFF) {
                 data[pos] = (byte) (newLen & 0xFF);
                 data[pos + 1] = (byte) ((newLen >> 8) & 0xFF);
-                return;
+                return true;
             }
             if (be == oldLen && newLen <= 0xFFFF) {
                 data[pos] = (byte) ((newLen >> 8) & 0xFF);
                 data[pos + 1] = (byte) (newLen & 0xFF);
-                return;
+                return true;
             }
         }
-        for (int pos = runStart - 4; pos >= 0; pos--) {
+        if (pos + 3 < data.length) {
             long le = (data[pos] & 0xFFL)
                     | ((data[pos + 1] & 0xFFL) << 8)
                     | ((data[pos + 2] & 0xFFL) << 16)
@@ -374,14 +469,183 @@ public final class HexUtils {
                 data[pos + 1] = (byte) ((newLen >> 8) & 0xFF);
                 data[pos + 2] = (byte) ((newLen >> 16) & 0xFF);
                 data[pos + 3] = (byte) ((newLen >> 24) & 0xFF);
-                return;
+                return true;
             }
             if (be == oldLen) {
                 data[pos] = (byte) ((newLen >> 24) & 0xFF);
                 data[pos + 1] = (byte) ((newLen >> 16) & 0xFF);
                 data[pos + 2] = (byte) ((newLen >> 8) & 0xFF);
                 data[pos + 3] = (byte) (newLen & 0xFF);
-                return;
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Infer total wire bytes from a leading length field (len / len+hdr).
+     */
+    static int inferWireLengthFromLeadingFields(byte[] data) {
+        if (data == null || data.length == 0) {
+            return -1;
+        }
+        // u8
+        int u8 = data[0] & 0xFF;
+        if (u8 > 0 && u8 <= data.length && (u8 == data.length || u8 + 1 == data.length)) {
+            return u8 == data.length ? u8 : u8 + 1;
+        }
+        if (data.length >= 2) {
+            int le = (data[0] & 0xFF) | ((data[1] & 0xFF) << 8);
+            int be = ((data[0] & 0xFF) << 8) | (data[1] & 0xFF);
+            for (int v : new int[]{le, be}) {
+                if (v > 0 && v <= data.length && (v == data.length || v + 2 == data.length)) {
+                    return v == data.length ? v : v + 2;
+                }
+            }
+        }
+        if (data.length >= 4) {
+            long le = (data[0] & 0xFFL)
+                    | ((data[1] & 0xFFL) << 8)
+                    | ((data[2] & 0xFFL) << 16)
+                    | ((data[3] & 0xFFL) << 24);
+            long be = ((data[0] & 0xFFL) << 24)
+                    | ((data[1] & 0xFFL) << 16)
+                    | ((data[2] & 0xFFL) << 8)
+                    | (data[3] & 0xFFL);
+            for (long v : new long[]{le, be}) {
+                if (v > 0 && v <= data.length && (v == data.length || v + 4 == data.length)) {
+                    return (int) (v == data.length ? v : v + 4);
+                }
+            }
+        }
+        // After sync, field may describe content end (not full padded buffer).
+        if (data.length >= 2) {
+            int le = (data[0] & 0xFF) | ((data[1] & 0xFF) << 8);
+            int be = ((data[0] & 0xFF) << 8) | (data[1] & 0xFF);
+            int content = endExcludingTrailingZeros(data);
+            for (int v : new int[]{le, be}) {
+                if (v > 0 && v <= data.length && (v == content || v + 2 == content)) {
+                    return v == content ? v : v + 2;
+                }
+            }
+        }
+        return -1;
+    }
+
+    private static int endExcludingTrailingZeros(byte[] data) {
+        if (data == null || data.length == 0) {
+            return 0;
+        }
+        int i = data.length - 1;
+        while (i >= 0 && data[i] == 0) {
+            i--;
+        }
+        return i + 1;
+    }
+
+    private static boolean trailingZerosOnly(byte[] data, int from) {
+        if (data == null || from < 0) {
+            return false;
+        }
+        for (int i = from; i < data.length; i++) {
+            if (data[i] != 0) {
+                return false;
+            }
+        }
+        return from < data.length;
+    }
+
+    private static boolean isPrintable(byte b) {
+        int v = b & 0xFF;
+        return v >= 0x20 && v < 0x7F;
+    }
+
+    /**
+     * Patch the length field closest to {@code runStart} among u8 / u16 / u32 LE|BE
+     * that currently equals {@code oldLen}.
+     */
+    private static void patchLengthFields(byte[] data, int runStart, int oldLen, int newLen) {
+        if (oldLen <= 0 || newLen < 0 || newLen > 0xFFFFFFFFL || runStart <= 0) {
+            return;
+        }
+        int bestPos = -1;
+        int bestWidth = 0;
+        boolean bestBe = false;
+        int bestDist = Integer.MAX_VALUE;
+
+        for (int pos = runStart - 1; pos >= 0; pos--) {
+            int dist = runStart - pos;
+            if ((data[pos] & 0xFF) == oldLen && newLen <= 0xFF && dist < bestDist) {
+                bestPos = pos;
+                bestWidth = 1;
+                bestBe = false;
+                bestDist = dist;
+            }
+        }
+        for (int pos = runStart - 2; pos >= 0; pos--) {
+            int dist = runStart - pos;
+            int le = (data[pos] & 0xFF) | ((data[pos + 1] & 0xFF) << 8);
+            int be = ((data[pos] & 0xFF) << 8) | (data[pos + 1] & 0xFF);
+            if (le == oldLen && newLen <= 0xFFFF && dist < bestDist) {
+                bestPos = pos;
+                bestWidth = 2;
+                bestBe = false;
+                bestDist = dist;
+            }
+            if (be == oldLen && newLen <= 0xFFFF && dist < bestDist) {
+                bestPos = pos;
+                bestWidth = 2;
+                bestBe = true;
+                bestDist = dist;
+            }
+        }
+        for (int pos = runStart - 4; pos >= 0; pos--) {
+            int dist = runStart - pos;
+            long le = (data[pos] & 0xFFL)
+                    | ((data[pos + 1] & 0xFFL) << 8)
+                    | ((data[pos + 2] & 0xFFL) << 16)
+                    | ((data[pos + 3] & 0xFFL) << 24);
+            long be = ((data[pos] & 0xFFL) << 24)
+                    | ((data[pos + 1] & 0xFFL) << 16)
+                    | ((data[pos + 2] & 0xFFL) << 8)
+                    | (data[pos + 3] & 0xFFL);
+            if (le == oldLen && dist < bestDist) {
+                bestPos = pos;
+                bestWidth = 4;
+                bestBe = false;
+                bestDist = dist;
+            }
+            if (be == oldLen && dist < bestDist) {
+                bestPos = pos;
+                bestWidth = 4;
+                bestBe = true;
+                bestDist = dist;
+            }
+        }
+        if (bestPos < 0) {
+            return;
+        }
+        if (bestWidth == 1) {
+            data[bestPos] = (byte) newLen;
+        } else if (bestWidth == 2) {
+            if (bestBe) {
+                data[bestPos] = (byte) ((newLen >> 8) & 0xFF);
+                data[bestPos + 1] = (byte) (newLen & 0xFF);
+            } else {
+                data[bestPos] = (byte) (newLen & 0xFF);
+                data[bestPos + 1] = (byte) ((newLen >> 8) & 0xFF);
+            }
+        } else {
+            if (bestBe) {
+                data[bestPos] = (byte) ((newLen >> 24) & 0xFF);
+                data[bestPos + 1] = (byte) ((newLen >> 16) & 0xFF);
+                data[bestPos + 2] = (byte) ((newLen >> 8) & 0xFF);
+                data[bestPos + 3] = (byte) (newLen & 0xFF);
+            } else {
+                data[bestPos] = (byte) (newLen & 0xFF);
+                data[bestPos + 1] = (byte) ((newLen >> 8) & 0xFF);
+                data[bestPos + 2] = (byte) ((newLen >> 16) & 0xFF);
+                data[bestPos + 3] = (byte) ((newLen >> 24) & 0xFF);
             }
         }
     }
