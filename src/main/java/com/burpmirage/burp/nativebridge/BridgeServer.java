@@ -32,6 +32,7 @@ import java.util.function.Consumer;
  *   client → server: {"type":"hello","pid":1}
  *   client → server: {"type":"event","message":"..."}
  *   server → client: {"type":"inject","data":"<b64>","peer":"optional"}  (Repeater send)
+ *   server → client: {"type":"detach"}  (graceful Frida unload + process exit)
  */
 public final class BridgeServer implements AutoCloseable {
     private final ExtensionSettings settings;
@@ -51,6 +52,7 @@ public final class BridgeServer implements AutoCloseable {
     });
 
     private ServerSocket serverSocket;
+    private volatile Socket activeClient;
     private volatile BufferedWriter activeWriter;
     private volatile Consumer<String> statusListener = s -> {};
     private volatile Consumer3 repeaterResponseListener = (d, p, r) -> {};
@@ -142,6 +144,43 @@ public final class BridgeServer implements AutoCloseable {
         writeLine(w, gson.toJson(msg));
     }
 
+    /**
+     * Ask the Frida host to {@code script.unload()} + {@code session.detach()} then exit.
+     * Returns {@code true} if the command was written to the live bridge client.
+     */
+    public boolean requestDetach() {
+        BufferedWriter w = activeWriter;
+        if (w == null) {
+            return false;
+        }
+        JsonObject msg = new JsonObject();
+        msg.addProperty("type", "detach");
+        boolean ok = writeLine(w, gson.toJson(msg));
+        if (ok) {
+            status("Detach command sent to Frida host");
+        }
+        return ok;
+    }
+
+    /**
+     * Drop the active Frida host TCP connection. Older bridge builds without a
+     * {@code detach} handler still run {@code script.unload}/{@code session.detach}
+     * in their disconnect cleanup path.
+     */
+    public void disconnectClient() {
+        Socket s = activeClient;
+        activeWriter = null;
+        activeClient = null;
+        if (s != null) {
+            try {
+                s.close();
+                status("Closed Frida bridge client socket");
+            } catch (IOException e) {
+                logging.logToError("Bridge client close failed: " + e.getMessage());
+            }
+        }
+    }
+
     private void acceptLoop() {
         while (running.get()) {
             try {
@@ -158,6 +197,7 @@ public final class BridgeServer implements AutoCloseable {
 
     private void handleClient(Socket socket) {
         status("Frida bridge connected from " + socket.getRemoteSocketAddress());
+        activeClient = socket;
         try (
                 BufferedReader reader = new BufferedReader(
                         new InputStreamReader(socket.getInputStream(), StandardCharsets.UTF_8));
@@ -182,6 +222,9 @@ public final class BridgeServer implements AutoCloseable {
         } finally {
             if (activeWriter != null) {
                 activeWriter = null;
+            }
+            if (activeClient == socket) {
+                activeClient = null;
             }
             try {
                 socket.close();

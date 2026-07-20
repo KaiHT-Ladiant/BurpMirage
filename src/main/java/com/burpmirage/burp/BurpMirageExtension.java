@@ -51,6 +51,7 @@ public final class BurpMirageExtension implements BurpExtension {
 
         bridge = new BridgeServer(settings, controller, api.logging());
         frida = new FridaController(settings, api.logging());
+        frida.setBridgeServer(bridge);
 
         try {
             bridge.start();

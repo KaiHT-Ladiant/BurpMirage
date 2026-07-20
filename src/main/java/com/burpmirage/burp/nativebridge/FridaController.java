@@ -41,12 +41,17 @@ public final class FridaController implements AutoCloseable {
 
     private final AtomicReference<Process> hostProcess = new AtomicReference<>();
     private final AtomicReference<ProcessInfo> attached = new AtomicReference<>();
+    private volatile BridgeServer bridgeServer;
     private Path workDir;
     private volatile Consumer<String> statusListener = s -> {};
 
     public FridaController(ExtensionSettings settings, Logging logging) {
         this.settings = settings;
         this.logging = logging;
+    }
+
+    public void setBridgeServer(BridgeServer bridgeServer) {
+        this.bridgeServer = bridgeServer;
     }
 
     public void setStatusListener(Consumer<String> statusListener) {
@@ -192,9 +197,40 @@ public final class FridaController implements AutoCloseable {
     }
 
     public synchronized void detach() {
-        Process proc = hostProcess.getAndSet(null);
         attached.set(null);
+        Process proc = hostProcess.get();
+
+        // 1) Burp → bridge JSON detach (unload + session.detach + exit)
+        boolean sent = false;
+        BridgeServer bridge = bridgeServer;
+        if (bridge != null && bridge.hasClient()) {
+            sent = bridge.requestDetach();
+            if (sent) {
+                status("Detach command sent — waiting for Frida host to exit");
+                try {
+                    Thread.sleep(400);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+            }
+            // 2) Close TCP so hosts without detach handler still run finally-cleanup.
+            if (proc != null && proc.isAlive()) {
+                bridge.disconnectClient();
+            }
+        }
+
         if (proc != null && proc.isAlive()) {
+            try {
+                if (proc.waitFor(8, TimeUnit.SECONDS)) {
+                    hostProcess.compareAndSet(proc, null);
+                    status("Detached Frida host (session unloaded)");
+                    return;
+                }
+                status("Graceful detach timed out — forcing Frida host exit");
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+            hostProcess.compareAndSet(proc, null);
             proc.destroy();
             try {
                 if (!proc.waitFor(2, TimeUnit.SECONDS)) {
@@ -204,7 +240,14 @@ public final class FridaController implements AutoCloseable {
                 Thread.currentThread().interrupt();
                 proc.destroyForcibly();
             }
-            status("Detached Frida host");
+            status("Detached Frida host (forced after timeout)");
+        } else {
+            hostProcess.compareAndSet(proc, null);
+            if (!sent) {
+                status("Detached (no Frida host process)");
+            } else {
+                status("Detached Frida host (session unloaded)");
+            }
         }
     }
 

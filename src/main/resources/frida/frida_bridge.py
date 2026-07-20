@@ -45,9 +45,11 @@ class BurpBridge:
         self._lock = threading.Lock()
         self._pending: Dict[str, Dict[str, Any]] = {}
         self._pending_cv = threading.Condition()
-        self._inject_handler = None
+        this._inject_handler = None
         self._config_handler = None
+        self._detach_handler = None
         self.alive = False
+        self.detach_requested = False
 
     def connect(self, retries: int = 40) -> None:
         last_err: Optional[Exception] = None
@@ -173,6 +175,16 @@ class BurpBridge:
             if self._config_handler:
                 self._config_handler(msg)
             return
+        if mtype == "detach":
+            print("[*] Detach command received from Burp", flush=True)
+            self.detach_requested = True
+            if self._detach_handler:
+                try:
+                    self._detach_handler()
+                except Exception as e:
+                    print(f"[!] Detach handler error: {e}", flush=True)
+            self.alive = False
+            return
         if mtype == "ping":
             self._write({"type": "pong", "ts": msg.get("ts")})
             return
@@ -196,6 +208,9 @@ class BurpBridge:
 
     def on_config(self, handler) -> None:
         self._config_handler = handler
+
+    def on_detach(self, handler) -> None:
+        self._detach_handler = handler
 
     def close(self) -> None:
         self.alive = False
@@ -356,6 +371,34 @@ def main() -> int:
     bridge.on_inject(handle_inject)
     bridge.on_config(handle_config)
 
+    stop = threading.Event()
+    cleaned = threading.Event()
+
+    def cleanup_frida(reason: str) -> None:
+        if cleaned.is_set():
+            return
+        cleaned.set()
+        print(f"[*] Cleaning up Frida session ({reason})…", flush=True)
+        try:
+            script.unload()
+        except Exception:
+            pass
+        try:
+            session.detach()
+        except Exception:
+            pass
+        try:
+            bridge.send_event("detached")
+        except Exception:
+            pass
+        stop.set()
+
+    def handle_detach() -> None:
+        cleanup_frida("burp-detach")
+        bridge.alive = False
+
+    bridge.on_detach(handle_detach)
+
     try:
         script.load()
     except Exception as e:
@@ -368,7 +411,11 @@ def main() -> int:
 
     exit_reason = "unknown"
     try:
-        while True:
+        while not stop.is_set():
+            if bridge.detach_requested:
+                exit_reason = "burp_detach"
+                print("[*] Exit reason: Detach requested by Burp", flush=True)
+                break
             if not bridge.alive:
                 exit_reason = "bridge_disconnected"
                 print("[!] Exit reason: Burp bridge disconnected", flush=True)
@@ -389,18 +436,18 @@ def main() -> int:
         exit_reason = "keyboard"
         print("[*] Detaching (KeyboardInterrupt)…", flush=True)
     finally:
+        if exit_reason == "burp_detach" or bridge.detach_requested:
+            exit_reason = "burp_detach"
         print(f"[*] Cleaning up (reason={exit_reason})", flush=True)
-        try:
-            script.unload()
-        except Exception:
-            pass
-        try:
-            session.detach()
-        except Exception:
-            pass
+        cleanup_frida(exit_reason)
         bridge.close()
 
-    return 0 if exit_reason in ("keyboard", "bridge_disconnected", "session_detached") else 1
+    return 0 if exit_reason in (
+        "keyboard",
+        "bridge_disconnected",
+        "session_detached",
+        "burp_detach",
+    ) else 1
 
 
 if __name__ == "__main__":

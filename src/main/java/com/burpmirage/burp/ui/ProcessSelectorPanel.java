@@ -80,8 +80,19 @@ public final class ProcessSelectorPanel extends JPanel {
         inject.addActionListener(e -> injectSelected());
         JButton detach = new JButton(I18n.get("process.detach"));
         detach.addActionListener(e -> {
-            fridaController.detach();
-            statusLabel.setText(I18n.get("process.detached"));
+            statusLabel.setText(I18n.get("process.detached") + "…");
+            new SwingWorker<Void, Void>() {
+                @Override
+                protected Void doInBackground() {
+                    fridaController.detach();
+                    return null;
+                }
+
+                @Override
+                protected void done() {
+                    statusLabel.setText(I18n.get("process.detached"));
+                }
+            }.execute();
         });
         actions.add(inject);
         actions.add(detach);
