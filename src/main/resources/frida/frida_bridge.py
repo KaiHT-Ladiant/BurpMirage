@@ -45,7 +45,7 @@ class BurpBridge:
         self._lock = threading.Lock()
         self._pending: Dict[str, Dict[str, Any]] = {}
         self._pending_cv = threading.Condition()
-        this._inject_handler = None
+        self._inject_handler = None
         self._config_handler = None
         self._detach_handler = None
         self.alive = False
