@@ -63,8 +63,13 @@ public final class HexUtils {
 
     /**
      * Parses a human-edited hex dump (offsets / ASCII column optional).
-     * When an ASCII column is present ({@code |....|}), printable characters there
-     * override the corresponding hex bytes so string edits in the dump are applied.
+     * <p>
+     * ASCII column is introduced by the literal separator {@code " |"} after the hex
+     * bytes (see {@link #toHexDump}). The closing {@code '|'} is optional. This avoids
+     * treating payload bytes that are themselves {@code '|'} (0x7C) as delimiters —
+     * which previously dropped ASCII edits on lines starting with {@code '|'} (e.g. SQL).
+     * Printable ASCII-column characters override the corresponding hex bytes;
+     * {@code '.'} keeps the hex byte (non-printable placeholder).
      */
     public static byte[] fromHexDump(String dump) {
         if (dump == null || dump.isBlank()) {
@@ -81,25 +86,29 @@ public final class HexUtils {
             if (line.isBlank()) {
                 continue;
             }
+            // Drop leading offset (e.g. "00000050  ")
+            String content = line.replaceFirst("^\\s*[0-9A-Fa-f]{4,8}\\s+", "");
+
             String asciiPart = null;
-            String content = line;
-            int pipe = line.indexOf('|');
-            if (pipe >= 0) {
-                content = line.substring(0, pipe);
-                int pipe2 = line.indexOf('|', pipe + 1);
-                if (pipe2 > pipe) {
-                    asciiPart = line.substring(pipe + 1, pipe2);
+            String hexPart = content;
+            // Separator used by toHexDump: " |" immediately before the ASCII column.
+            int sep = content.indexOf(" |");
+            if (sep >= 0) {
+                hexPart = content.substring(0, sep);
+                String rest = content.substring(sep + 2); // after " |"
+                if (!rest.isEmpty() && rest.charAt(rest.length() - 1) == '|') {
+                    asciiPart = rest.substring(0, rest.length() - 1);
                 } else {
-                    asciiPart = line.substring(pipe + 1);
+                    asciiPart = rest;
                 }
             }
-            content = content.replaceFirst("^\\s*[0-9A-Fa-f]{4,8}\\s+", "");
+
             List<Byte> lineBytes = new ArrayList<>();
-            Matcher m = hexByte.matcher(content);
+            Matcher m = hexByte.matcher(hexPart);
             while (m.find()) {
                 lineBytes.add((byte) Integer.parseInt(m.group(1), 16));
             }
-            if (asciiPart != null) {
+            if (asciiPart != null && !lineBytes.isEmpty()) {
                 int n = Math.min(asciiPart.length(), lineBytes.size());
                 for (int i = 0; i < n; i++) {
                     char c = asciiPart.charAt(i);
