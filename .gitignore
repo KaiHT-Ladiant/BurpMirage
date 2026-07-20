@@ -1,0 +1,26 @@
+.gradle/
+build/
+out/
+*.iml
+.idea/
+.vscode/
+*.class
+*.log
+.DS_Store
+Thumbs.db
+
+# Frida temp work dirs (created at runtime on each machine)
+echomirage-frida-*/
+burpmirage-frida-*/
+
+# PyInstaller (standalone bridge build)
+dist/
+packaging/build/
+*.spec.bak
+__pycache__/
+*.pyc
+
+# Secrets / local env
+.env
+*.pem
+*.key
