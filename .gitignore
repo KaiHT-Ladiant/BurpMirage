@@ -24,3 +24,6 @@ __pycache__/
 .env
 *.pem
 *.key
+
+# Local chat/prompt backup (do not commit)
+_chat_backup/
