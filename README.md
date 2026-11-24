@@ -19,8 +19,8 @@
 <p align="center">
   <a href="./README.ko.md">한국어</a> ·
   <a href="https://github.com/KaiHT-Ladiant/BurpMirage/releases">Releases</a> ·
-  <a href="https://github.com/KaiHT-Ladiant/BurpMirage/releases/tag/v1.0.0-ko">Korean UI JAR</a> ·
-  <a href="https://github.com/KaiHT-Ladiant/BurpMirage/releases/tag/v1.0.0-en">English UI JAR</a>
+  <a href="https://github.com/KaiHT-Ladiant/BurpMirage/releases/tag/v1.0.1-ko">Korean UI JAR</a> ·
+  <a href="https://github.com/KaiHT-Ladiant/BurpMirage/releases/tag/v1.0.1-en">English UI JAR</a>
 </p>
 
 > **End users do not install Python or Frida.** Download a release JAR — it bundles `burpmirage-bridge.exe`, a self-contained native bridge. Load the JAR in Burp and go.
@@ -68,8 +68,8 @@ BurpMirage intercepts, inspects, and modifies **raw TCP / binary** traffic from 
 ## Quick start
 
 1. Download a release JAR from [Releases](https://github.com/KaiHT-Ladiant/BurpMirage/releases):
-   - `burpmirage-1.0.0-en.jar` — English UI
-   - `burpmirage-1.0.0-ko.jar` — Korean UI
+   - `burpmirage-1.0.1-en.jar` — English UI
+   - `burpmirage-1.0.1-ko.jar` — Korean UI
 2. In Burp: **Extensions → Add → Java** → select the JAR  
    Extension class: `com.burpmirage.burp.BurpMirageExtension`
 3. Open the **BurpMirage** tab — the bundled bridge listens on `127.0.0.1:27042`.

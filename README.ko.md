@@ -19,8 +19,8 @@
 <p align="center">
   <a href="./README.md">English</a> ·
   <a href="https://github.com/KaiHT-Ladiant/BurpMirage/releases">Releases</a> ·
-  <a href="https://github.com/KaiHT-Ladiant/BurpMirage/releases/tag/v1.0.0-ko">한글 UI JAR</a> ·
-  <a href="https://github.com/KaiHT-Ladiant/BurpMirage/releases/tag/v1.0.0-en">영문 UI JAR</a>
+  <a href="https://github.com/KaiHT-Ladiant/BurpMirage/releases/tag/v1.0.1-ko">한글 UI JAR</a> ·
+  <a href="https://github.com/KaiHT-Ladiant/BurpMirage/releases/tag/v1.0.1-en">영문 UI JAR</a>
 </p>
 
 > **일반 사용자는 Python이나 Frida를 설치할 필요가 없습니다.** Releases JAR에는 `burpmirage-bridge.exe`(독립 실행형 네이티브 브릿지)가 포함되어 있습니다. JAR만 Burp에 로드하면 됩니다.
@@ -68,8 +68,8 @@ Windows 프로세스의 **raw TCP / 바이너리** 트래픽을 Burp에서 가�
 ## 빠른 시작
 
 1. [Releases](https://github.com/KaiHT-Ladiant/BurpMirage/releases)에서 JAR 다운로드:
-   - `burpmirage-1.0.0-ko.jar` — **한글 UI**
-   - `burpmirage-1.0.0-en.jar` — 영문 UI
+   - `burpmirage-1.0.1-ko.jar` — **한글 UI**
+   - `burpmirage-1.0.1-en.jar` — 영문 UI
 2. Burp: **Extensions → Add → Java** → JAR 선택  
    Extension class: `com.burpmirage.burp.BurpMirageExtension`
 3. **BurpMirage** 탭 — 포함된 브릿지가 `127.0.0.1:27042`에서 수신
