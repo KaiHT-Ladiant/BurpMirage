@@ -147,8 +147,16 @@ function requestDecision(direction, api, fd, buf, length) {
 
   var response = { action: 'forward', data: null };
   send(payload);
+  // Frida script.post({type, payload}) delivers the whole message to recv().
+  // Decision lives in value.payload — using value itself left action/data undefined,
+  // so applyInPlace kept the original buffer (edits never reached the wire).
   recv(id, function (value) {
-    if (value) {
+    if (!value) {
+      return;
+    }
+    if (value.payload !== undefined && value.payload !== null) {
+      response = value.payload;
+    } else if (value.action !== undefined) {
       response = value;
     }
   }).wait();
