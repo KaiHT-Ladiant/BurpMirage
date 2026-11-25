@@ -18,6 +18,8 @@ import java.net.ServerSocket;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
 import java.util.Base64;
+import java.util.List;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -52,10 +54,12 @@ public final class BridgeServer implements AutoCloseable {
     });
 
     private ServerSocket serverSocket;
-    private volatile Socket activeClient;
-    private volatile BufferedWriter activeWriter;
+    /** All connected Frida hosts (one TCP client may cover many PIDs). */
+    private final List<ClientSession> clients = new CopyOnWriteArrayList<>();
     private volatile Consumer<String> statusListener = s -> {};
     private volatile Consumer3 repeaterResponseListener = (d, p, r) -> {};
+
+    private record ClientSession(Socket socket, BufferedWriter writer) {}
 
     @FunctionalInterface
     public interface Consumer3 {
@@ -94,7 +98,7 @@ public final class BridgeServer implements AutoCloseable {
             }
         } catch (IOException ignored) {
         }
-        activeWriter = null;
+        clients.clear();
         status("Bridge stopped");
     }
 
@@ -103,7 +107,7 @@ public final class BridgeServer implements AutoCloseable {
     }
 
     public boolean hasClient() {
-        return activeWriter != null;
+        return !clients.isEmpty();
     }
 
     /**
@@ -114,10 +118,6 @@ public final class BridgeServer implements AutoCloseable {
     }
 
     public boolean injectSend(byte[] data, String peerHint, String requestId) {
-        BufferedWriter w = activeWriter;
-        if (w == null) {
-            return false;
-        }
         JsonObject msg = new JsonObject();
         msg.addProperty("type", "inject");
         msg.addProperty("data", Base64.getEncoder().encodeToString(data));
@@ -128,14 +128,10 @@ public final class BridgeServer implements AutoCloseable {
         if (requestId != null) {
             msg.addProperty("requestId", requestId);
         }
-        return writeLine(w, gson.toJson(msg));
+        return broadcast(gson.toJson(msg));
     }
 
     public void pushConfig() {
-        BufferedWriter w = activeWriter;
-        if (w == null) {
-            return;
-        }
         JsonObject msg = new JsonObject();
         msg.addProperty("type", "config");
         msg.addProperty("intercept", settings.interceptEnabled());
@@ -146,44 +142,51 @@ public final class BridgeServer implements AutoCloseable {
         msg.addProperty("modeTlsUnpin", settings.modeTlsUnpin());
         msg.addProperty("burpProxyHost", settings.burpProxyHost());
         msg.addProperty("burpProxyPort", settings.burpProxyPort());
-        writeLine(w, gson.toJson(msg));
+        broadcast(gson.toJson(msg));
     }
 
     /**
      * Ask the Frida host to {@code script.unload()} + {@code session.detach()} then exit.
-     * Returns {@code true} if the command was written to the live bridge client.
+     * Returns {@code true} if the command was written to at least one live bridge client.
      */
     public boolean requestDetach() {
-        BufferedWriter w = activeWriter;
-        if (w == null) {
-            return false;
-        }
         JsonObject msg = new JsonObject();
         msg.addProperty("type", "detach");
-        boolean ok = writeLine(w, gson.toJson(msg));
+        boolean ok = broadcast(gson.toJson(msg));
         if (ok) {
-            status("Detach command sent to Frida host");
+            status("Detach command sent to Frida host(s)");
         }
         return ok;
     }
 
     /**
-     * Drop the active Frida host TCP connection. Older bridge builds without a
+     * Drop all Frida host TCP connections. Older bridge builds without a
      * {@code detach} handler still run {@code script.unload}/{@code session.detach}
      * in their disconnect cleanup path.
      */
     public void disconnectClient() {
-        Socket s = activeClient;
-        activeWriter = null;
-        activeClient = null;
-        if (s != null) {
+        List<ClientSession> snapshot = List.copyOf(clients);
+        clients.clear();
+        for (ClientSession c : snapshot) {
             try {
-                s.close();
-                status("Closed Frida bridge client socket");
+                c.socket().close();
             } catch (IOException e) {
                 logging.logToError("Bridge client close failed: " + e.getMessage());
             }
         }
+        if (!snapshot.isEmpty()) {
+            status("Closed Frida bridge client socket(s)");
+        }
+    }
+
+    private boolean broadcast(String jsonLine) {
+        boolean any = false;
+        for (ClientSession c : clients) {
+            if (writeLine(c.writer(), jsonLine)) {
+                any = true;
+            }
+        }
+        return any;
     }
 
     private void acceptLoop() {
@@ -202,15 +205,16 @@ public final class BridgeServer implements AutoCloseable {
 
     private void handleClient(Socket socket) {
         status("Frida bridge connected from " + socket.getRemoteSocketAddress());
-        activeClient = socket;
+        ClientSession session = null;
         try (
                 BufferedReader reader = new BufferedReader(
                         new InputStreamReader(socket.getInputStream(), StandardCharsets.UTF_8));
                 BufferedWriter writer = new BufferedWriter(
                         new OutputStreamWriter(socket.getOutputStream(), StandardCharsets.UTF_8))
         ) {
-            activeWriter = writer;
-            pushConfig();
+            session = new ClientSession(socket, writer);
+            clients.add(session);
+            pushConfigTo(writer);
             String line;
             while ((line = reader.readLine()) != null) {
                 if (line.isBlank()) {
@@ -225,18 +229,31 @@ public final class BridgeServer implements AutoCloseable {
         } catch (IOException e) {
             logging.logToOutput("Bridge client disconnected: " + e.getMessage());
         } finally {
-            if (activeWriter != null) {
-                activeWriter = null;
-            }
-            if (activeClient == socket) {
-                activeClient = null;
+            if (session != null) {
+                clients.remove(session);
             }
             try {
                 socket.close();
             } catch (IOException ignored) {
             }
-            status("Frida bridge disconnected");
+            status(clients.isEmpty()
+                    ? "Frida bridge disconnected"
+                    : "Frida bridge client left (" + clients.size() + " remaining)");
         }
+    }
+
+    private void pushConfigTo(BufferedWriter writer) {
+        JsonObject msg = new JsonObject();
+        msg.addProperty("type", "config");
+        msg.addProperty("intercept", settings.interceptEnabled());
+        msg.addProperty("hookSend", settings.hookSend());
+        msg.addProperty("hookRecv", settings.hookRecv());
+        msg.addProperty("modeProxyForce", settings.modeProxyForce());
+        msg.addProperty("modeSocketMirage", settings.modeSocketMirage());
+        msg.addProperty("modeTlsUnpin", settings.modeTlsUnpin());
+        msg.addProperty("burpProxyHost", settings.burpProxyHost());
+        msg.addProperty("burpProxyPort", settings.burpProxyPort());
+        writeLine(writer, gson.toJson(msg));
     }
 
     private void handleMessage(String line, BufferedWriter writer) {

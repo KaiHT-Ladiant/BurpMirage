@@ -41,6 +41,8 @@ public final class FridaController implements AutoCloseable {
 
     private final AtomicReference<Process> hostProcess = new AtomicReference<>();
     private final AtomicReference<ProcessInfo> attached = new AtomicReference<>();
+    private final AtomicReference<List<ProcessInfo>> attachedGroup =
+            new AtomicReference<>(List.of());
     private volatile BridgeServer bridgeServer;
     private Path workDir;
     private volatile Consumer<String> statusListener = s -> {};
@@ -62,29 +64,49 @@ public final class FridaController implements AutoCloseable {
         return attached.get();
     }
 
+    public List<ProcessInfo> attachedGroup() {
+        return attachedGroup.get();
+    }
+
     public boolean isAttached() {
         Process p = hostProcess.get();
         return p != null && p.isAlive();
     }
 
     public synchronized void injectAndHook(ProcessInfo process) throws IOException, InterruptedException {
+        injectAndHook(List.of(process));
+    }
+
+    public synchronized void injectAndHook(List<ProcessInfo> processes)
+            throws IOException, InterruptedException {
+        if (processes == null || processes.isEmpty()) {
+            throw new IOException("No processes to inject");
+        }
         detach();
 
         ensureScriptsExtracted();
 
         Path hooksJs = workDir.resolve("hooks.js");
         Path bridgeExe = resolveBridgeExe();
+        boolean multi = processes.size() > 1;
 
         String python = settings.pythonPath();
         List<String> cmd = new ArrayList<>();
-        if (bridgeExe != null) {
-            // Standalone bundle: frida is embedded, no Python / pip required.
+        // Multi-PID needs updated frida_bridge.py; prefer extracted Python over older standalone exe.
+        if (bridgeExe != null && !multi) {
             cmd.add(bridgeExe.toAbsolutePath().toString());
             status("Using standalone bridge: " + bridgeExe.toAbsolutePath());
         } else {
             settings.resolvePythonIfNeeded();
             python = settings.pythonPath();
             if (!PythonDetector.hasFrida(python)) {
+                if (bridgeExe != null && multi) {
+                    throw new IOException(
+                            "Group inject needs Python+frida (multi-PID bridge). "
+                                    + "Standalone exe is single-PID only.\n\n"
+                                    + PythonDetector.diagnosis()
+                    );
+                }
                 throw new IOException(
                         "No standalone bridge (burpmirage-bridge.exe) found and Python has no frida module: "
                                 + python + "\n\n"
@@ -98,9 +120,24 @@ public final class FridaController implements AutoCloseable {
             Path bridgePy = workDir.resolve("frida_bridge.py");
             cmd.add(python);
             cmd.add(bridgePy.toAbsolutePath().toString());
+            if (multi) {
+                status("Using Python multi-attach bridge for " + processes.size() + " PIDs");
+            }
         }
-        cmd.add("--pid");
-        cmd.add(Integer.toString(process.pid()));
+        StringBuilder pidCsv = new StringBuilder();
+        for (int i = 0; i < processes.size(); i++) {
+            if (i > 0) {
+                pidCsv.append(',');
+            }
+            pidCsv.append(processes.get(i).pid());
+        }
+        if (multi) {
+            cmd.add("--pids");
+            cmd.add(pidCsv.toString());
+        } else {
+            cmd.add("--pid");
+            cmd.add(Integer.toString(processes.get(0).pid()));
+        }
         cmd.add("--host");
         cmd.add("127.0.0.1");
         cmd.add("--port");
@@ -118,8 +155,10 @@ public final class FridaController implements AutoCloseable {
         env.put("PYTHONIOENCODING", "utf-8");
         Process proc = pb.start();
         hostProcess.set(proc);
-        attached.set(process);
-        status("Injecting into " + process.name() + " (" + process.pid() + ") using " + python);
+        ProcessInfo primary = processes.get(0);
+        attached.set(primary);
+        attachedGroup.set(List.copyOf(processes));
+        status("Injecting into " + processes.size() + " process(es): " + pidCsv + " using " + python);
 
         CountDownLatch ready = new CountDownLatch(1);
         AtomicBoolean success = new AtomicBoolean(false);
@@ -134,7 +173,8 @@ public final class FridaController implements AutoCloseable {
                     logging.logToOutput("[FridaHost] " + line);
                     statusListener.accept(line);
                     String lower = line.toLowerCase();
-                    if (lower.contains("hooked pid") || lower.contains("connected to burp bridge")
+                    if (lower.contains("hooked pid") || lower.contains("hooked pids")
+                            || lower.contains("connected to burp bridge")
                             || lower.contains("winsock hooks installed")
                             || lower.contains("attached to pid")) {
                         success.set(true);
@@ -178,6 +218,7 @@ public final class FridaController implements AutoCloseable {
                     ? lines.subList(lines.size() - 20, lines.size()) : lines);
             hostProcess.compareAndSet(proc, null);
             attached.set(null);
+            attachedGroup.set(List.of());
             if (code == 9009) {
                 throw new IOException(I18n.format("frida.error.python9009", python, tail.isBlank() ? "(empty)" : tail));
             }
@@ -190,14 +231,17 @@ public final class FridaController implements AutoCloseable {
         }
         if (!signaled || !success.get()) {
             // Still alive but no ready signal — warn but allow (hooks may install late)
-            status(I18n.format("frida.status.waiting", process.name()));
+            status(I18n.format("frida.status.waiting", primary.name()));
+        } else if (processes.size() == 1) {
+            status(I18n.format("frida.status.hooked", primary.name(), primary.pid()));
         } else {
-            status(I18n.format("frida.status.hooked", process.name(), process.pid()));
+            status(I18n.format("frida.status.hooked_group", processes.size(), pidCsv.toString()));
         }
     }
 
     public synchronized void detach() {
         attached.set(null);
+        attachedGroup.set(List.of());
         Process proc = hostProcess.get();
 
         // 1) Burp → bridge JSON detach (unload + session.detach + exit)

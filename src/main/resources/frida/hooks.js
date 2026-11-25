@@ -23,6 +23,7 @@ var proxyFnsHooked = {};
 var socketHooksInstalled = false;
 var tlsUnpinInstalled = false;
 var tlsUnpinHooked = {};
+var socketHandles = {}; // HANDLE/SOCKET string keys — Chromium often uses WriteFile/ReadFile on sockets
 // BoringSSL: enum ssl_verify_result_t { ssl_verify_ok = 0, ssl_verify_invalid = 1, ssl_verify_retry = 2 }
 var boringSslVerifyOk = null;
 
@@ -436,7 +437,9 @@ function detectAndAnnounce() {
   var chromium = detectChromiumFamily();
   var hint;
   if (chromium) {
-    hint = 'Chromium/CEF (' + chromium + ') — inject NetworkService/Main; Mode C TLS Unpin + route HTTPS via Burp Proxy';
+    hint = 'Chromium/CEF (' + chromium + ') — use Inject Group (Renderer/Main/NetworkService). '
+        + 'Single NetworkService is often empty (sockets may live on Renderer). '
+        + 'Mode A WinHTTP is usually ineffective here; Mode B hooks send+WriteFile.';
   } else if ((winhttp || wininet) && ws2) {
     hint = 'HTTP stack + Winsock detected — recommend Mode A+B (both ON)';
   } else if (winhttp || wininet) {
@@ -938,8 +941,138 @@ function installSocketHooks() {
   }
 
   hookWSARecv();
+  trackSocketConstructors();
+  installSocketFileIoHooks();
   socketHooksInstalled = true;
-  send({ type: 'event', message: 'Mode B Winsock hooks installed in pid ' + Process.id });
+  send({ type: 'event', message: 'Mode B Winsock+WriteFile/ReadFile hooks installed in pid ' + Process.id });
+}
+
+function noteSocketHandle(h) {
+  try {
+    if (h === undefined || h === null) return;
+    var key = (typeof h === 'object' && h.toString) ? h.toString() : ('' + h);
+    if (key === '0' || key === '0x0') return;
+    socketHandles[key] = true;
+  } catch (e) {}
+}
+
+function isTrackedSocketHandle(h) {
+  try {
+    if (h === undefined || h === null) return false;
+    var key = (typeof h === 'object' && h.toString) ? h.toString() : ('' + h);
+    return !!socketHandles[key];
+  } catch (e) {
+    return false;
+  }
+}
+
+function trackSocketConstructors() {
+  ['socket', 'WSASocketW', 'WSASocketA', 'accept', 'WSAAccept'].forEach(function (name) {
+    var addr = resolveExport(name);
+    if (addr === null) return;
+    Interceptor.attach(addr, {
+      onLeave: function (retval) {
+        try {
+          if (!retval.isNull && retval.isNull()) return;
+          // INVALID_SOCKET is -1 / ~0
+          var n = retval.toInt32();
+          if (n === -1 || n === 0) return;
+          noteSocketHandle(retval);
+        } catch (e) {}
+      }
+    });
+  });
+}
+
+/**
+ * Chromium/Electron often bypasses send/WSASend and writes socket HANDLEs via WriteFile/ReadFile (IOCP).
+ */
+function installSocketFileIoHooks() {
+  var k32 = Process.findModuleByName('kernel32.dll');
+  if (!k32) return;
+
+  function hookWrite(name) {
+    var addr = resolveModExport(k32, name);
+    if (addr === null) return;
+    Interceptor.attach(addr, {
+      onEnter: function (args) {
+        if (!hooked.send || suppressHook) {
+          this.skip = true;
+          return;
+        }
+        this.skip = false;
+        this.h = args[0];
+        if (!isTrackedSocketHandle(this.h)) {
+          this.skip = true;
+          return;
+        }
+        this.buf = args[1];
+        this.len = args[2].toInt32();
+        if (this.len <= 0) return;
+        // Use handle numeric as fake fd for peerOf fallback
+        var fd = this.h.toInt32();
+        lastSocketFd = fd;
+        var decision = requestDecision('send', name, fd, this.buf, this.len);
+        var applied = applyInPlace(this.buf, this.len, decision);
+        this.drop = applied.drop;
+        if (!this.drop && decision && decision.data) {
+          args[2] = ptr(applied.length);
+        }
+      },
+      onLeave: function (retval) {
+        if (this.skip) return;
+        if (this.drop) {
+          retval.replace(ptr(0));
+        }
+      }
+    });
+    console.log('[BurpMirage] hooked ' + name + ' (socket handles)');
+  }
+
+  function hookRead(name) {
+    var addr = resolveModExport(k32, name);
+    if (addr === null) return;
+    Interceptor.attach(addr, {
+      onEnter: function (args) {
+        this.h = args[0];
+        this.buf = args[1];
+        this.lpRead = args[3];
+        this.overlapped = args[4];
+        this.async = this.overlapped && !this.overlapped.isNull();
+        this.skip = !hooked.recv || !isTrackedSocketHandle(this.h) || this.async;
+        if (!this.skip) {
+          lastSocketFd = this.h.toInt32();
+        }
+      },
+      onLeave: function (retval) {
+        if (this.skip) return;
+        if (retval.toInt32() === 0) return;
+        var got = 0;
+        try {
+          if (this.lpRead && !this.lpRead.isNull()) {
+            got = this.lpRead.readU32();
+          }
+        } catch (e) {
+          return;
+        }
+        if (got <= 0) return;
+        var fd = this.h.toInt32();
+        var decision = requestDecision('recv', name, fd, this.buf, got);
+        var applied = applyInPlace(this.buf, got, decision);
+        if (applied.drop) {
+          try { this.lpRead.writeU32(0); } catch (e2) {}
+          retval.replace(ptr(0));
+        } else if (decision && decision.data) {
+          try { this.lpRead.writeU32(applied.length); } catch (e3) {}
+        }
+      }
+    });
+    console.log('[BurpMirage] hooked ' + name + ' (socket handles)');
+  }
+
+  hookWrite('WriteFile');
+  hookWrite('WriteFileEx');
+  hookRead('ReadFile');
 }
 
 function install() {

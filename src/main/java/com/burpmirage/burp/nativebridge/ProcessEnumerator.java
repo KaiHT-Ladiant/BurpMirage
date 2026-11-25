@@ -23,10 +23,57 @@ public final class ProcessEnumerator {
 
     public List<ProcessInfo> listProcesses() {
         List<ProcessInfo> viaPs = listViaPowerShell();
-        if (!viaPs.isEmpty()) {
-            return viaPs;
+        List<ProcessInfo> base = !viaPs.isEmpty() ? viaPs : listViaTasklist();
+        return enrichTcpOwnership(base);
+    }
+
+    /** Mark processes that currently own Established/Listen TCP sockets (★ in UI). */
+    private static List<ProcessInfo> enrichTcpOwnership(List<ProcessInfo> input) {
+        Map<Integer, Integer> counts = countTcpByPid();
+        if (counts.isEmpty()) {
+            return input;
         }
-        return listViaTasklist();
+        List<ProcessInfo> out = new ArrayList<>(input.size());
+        for (ProcessInfo p : input) {
+            Integer n = counts.get(p.pid());
+            out.add(n == null || n == 0 ? p : p.withTcpSocketCount(n));
+        }
+        return out;
+    }
+
+    private static Map<Integer, Integer> countTcpByPid() {
+        Map<Integer, Integer> counts = new LinkedHashMap<>();
+        try {
+            ProcessBuilder pb = new ProcessBuilder(
+                    "powershell.exe",
+                    "-NoProfile",
+                    "-Command",
+                    "Get-NetTCPConnection -State Established,Listen -ErrorAction SilentlyContinue | "
+                            + "Group-Object OwningProcess | "
+                            + "ForEach-Object { '{0},{1}' -f $_.Name, $_.Count }"
+            );
+            pb.redirectErrorStream(true);
+            Process process = pb.start();
+            try (BufferedReader reader = new BufferedReader(
+                    new InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8))) {
+                String line;
+                while ((line = reader.readLine()) != null) {
+                    String[] parts = line.trim().split(",");
+                    if (parts.length < 2) {
+                        continue;
+                    }
+                    int pid = parseInt(parts[0]);
+                    int n = parseInt(parts[1]);
+                    if (pid > 0 && n > 0) {
+                        counts.put(pid, n);
+                    }
+                }
+            }
+            process.waitFor();
+        } catch (Exception ignored) {
+            return Map.of();
+        }
+        return counts;
     }
 
     private List<ProcessInfo> listViaPowerShell() {

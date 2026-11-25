@@ -45,26 +45,66 @@ public final class ProcessRole {
         return "";
     }
 
-    /** True when this role is the usual place to catch HTTP/TLS. */
-    public static boolean recommendedForHttp(String role) {
+    /**
+     * Roles that often carry app traffic in Chromium/Electron multi-process apps.
+     * Not a guarantee — live TCP ownership ({@code ★}) is the stronger signal.
+     */
+    public static boolean inCaptureGroup(String role) {
         if (role == null || role.isBlank()) {
             return false;
         }
         String r = role.toLowerCase(Locale.ROOT);
         return r.equals("main")
                 || r.equals("browser")
+                || r.equals("renderer")
                 || r.contains("networkservice")
-                || r.equals("network");
+                || r.equals("network")
+                || r.equals("utility");
+    }
+
+    /** @deprecated use {@link #inCaptureGroup(String)} */
+    public static boolean recommendedForHttp(String role) {
+        return inCaptureGroup(role);
+    }
+
+    /** Lower is higher priority when sorting a capture group. */
+    public static int capturePriority(String role) {
+        if (role == null || role.isBlank()) {
+            return 50;
+        }
+        String r = role.toLowerCase(Locale.ROOT);
+        if (r.equals("renderer")) {
+            return 10;
+        }
+        if (r.contains("network")) {
+            return 20;
+        }
+        if (r.equals("main") || r.equals("browser")) {
+            return 30;
+        }
+        if (r.equals("utility")) {
+            return 40;
+        }
+        return 60;
     }
 
     public static String display(String role) {
-        if (role == null || role.isBlank()) {
-            return "—";
+        return display(role, 0);
+    }
+
+    /**
+     * {@code ★} = owns live TCP sockets (inject here / include in group).
+     * {@code ·} = typical Chromium capture-group role without current sockets.
+     */
+    public static String display(String role, int tcpSocketCount) {
+        String base = (role == null || role.isBlank()) ? "—" : role;
+        if (tcpSocketCount > 0) {
+            return base + " ★";
         }
-        if (recommendedForHttp(role)) {
-            return role + " ★";
+        if (inCaptureGroup(role)) {
+            return base + " ·";
         }
-        return role;
+        return base;
     }
 
     private static String prettySubType(String sub) {

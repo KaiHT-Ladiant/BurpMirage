@@ -1,5 +1,6 @@
 package com.burpmirage.burp.ui;
 
+import com.burpmirage.burp.model.ProcessCaptureGroup;
 import com.burpmirage.burp.model.ProcessInfo;
 import com.burpmirage.burp.nativebridge.FridaController;
 import com.burpmirage.burp.nativebridge.ProcessEnumerator;
@@ -103,8 +104,12 @@ public final class ProcessSelectorPanel extends JPanel {
         north.add(filters, BorderLayout.WEST);
 
         JPanel actions = new JPanel(new FlowLayout(FlowLayout.RIGHT));
-        JButton inject = new JButton(I18n.get("process.inject"));
-        inject.addActionListener(e -> injectSelected());
+        JButton injectGroup = new JButton(I18n.get("process.inject_group"));
+        injectGroup.setToolTipText(I18n.get("process.inject_group_tip"));
+        injectGroup.addActionListener(e -> injectSelected(true));
+        JButton injectOne = new JButton(I18n.get("process.inject_one"));
+        injectOne.setToolTipText(I18n.get("process.inject_one_tip"));
+        injectOne.addActionListener(e -> injectSelected(false));
         JButton detach = new JButton(I18n.get("process.detach"));
         detach.addActionListener(e -> {
             statusLabel.setText(I18n.get("process.detached") + "…");
@@ -121,7 +126,8 @@ public final class ProcessSelectorPanel extends JPanel {
                 }
             }.execute();
         });
-        actions.add(inject);
+        actions.add(injectGroup);
+        actions.add(injectOne);
         actions.add(detach);
         north.add(actions, BorderLayout.EAST);
 
@@ -204,7 +210,7 @@ public final class ProcessSelectorPanel extends JPanel {
         }
     }
 
-    private void injectSelected() {
+    private void injectSelected(boolean group) {
         int viewRow = table.getSelectedRow();
         if (viewRow < 0) {
             JOptionPane.showMessageDialog(this, I18n.get("process.select_first"), I18n.get("app.name"), JOptionPane.WARNING_MESSAGE);
@@ -220,12 +226,24 @@ public final class ProcessSelectorPanel extends JPanel {
                     "");
         }
 
-        ProcessInfo target = info;
-        statusLabel.setText(I18n.get("process.injecting"));
+        ProcessInfo seed = info;
+        java.util.List<ProcessInfo> targets = group
+                ? ProcessCaptureGroup.related(seed, cache)
+                : java.util.List.of(seed);
+        if (targets.isEmpty()) {
+            targets = java.util.List.of(seed);
+        }
+
+        String pidList = targets.stream()
+                .map(p -> Integer.toString(p.pid()))
+                .reduce((a, b) -> a + "," + b)
+                .orElse(Integer.toString(seed.pid()));
+        statusLabel.setText(I18n.format("process.injecting_group", targets.size(), pidList));
+        java.util.List<ProcessInfo> finalTargets = targets;
         new SwingWorker<Void, Void>() {
             @Override
             protected Void doInBackground() throws Exception {
-                fridaController.injectAndHook(target);
+                fridaController.injectAndHook(finalTargets);
                 return null;
             }
 
@@ -233,12 +251,16 @@ public final class ProcessSelectorPanel extends JPanel {
             protected void done() {
                 try {
                     get();
-                    onAttached.accept(target);
-                    String role = target.role();
-                    if (!role.isBlank()) {
-                        statusLabel.setText(I18n.format("process.hooked_role", target.name(), target.pid(), role));
+                    onAttached.accept(seed);
+                    if (finalTargets.size() == 1) {
+                        String role = seed.role();
+                        if (!role.isBlank()) {
+                            statusLabel.setText(I18n.format("process.hooked_role", seed.name(), seed.pid(), role));
+                        } else {
+                            statusLabel.setText(I18n.format("process.hooked", seed.name(), seed.pid()));
+                        }
                     } else {
-                        statusLabel.setText(I18n.format("process.hooked", target.name(), target.pid()));
+                        statusLabel.setText(I18n.format("process.hooked_group", finalTargets.size(), pidList));
                     }
                 } catch (Exception e) {
                     statusLabel.setText(I18n.get("process.inject_failed"));

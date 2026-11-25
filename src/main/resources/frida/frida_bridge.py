@@ -240,7 +240,18 @@ def _bundled_hooks_path() -> Optional[str]:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="BurpMirage Frida ↔ Burp bridge")
-    parser.add_argument("--pid", type=int, required=True)
+    parser.add_argument(
+        "--pid",
+        type=int,
+        action="append",
+        default=[],
+        help="Target PID (repeat for multi-process Chromium/Electron groups)",
+    )
+    parser.add_argument(
+        "--pids",
+        default="",
+        help="Comma-separated PIDs (alternative to repeated --pid)",
+    )
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=27042)
     parser.add_argument(
@@ -249,6 +260,24 @@ def main() -> int:
         help="Path to hooks.js (optional; uses bundled copy when omitted)",
     )
     args = parser.parse_args()
+
+    pids: list[int] = list(args.pid or [])
+    if args.pids:
+        for part in args.pids.split(","):
+            part = part.strip()
+            if part:
+                pids.append(int(part))
+    # unique preserve order
+    seen: set[int] = set()
+    uniq_pids: list[int] = []
+    for p in pids:
+        if p > 0 and p not in seen:
+            seen.add(p)
+            uniq_pids.append(p)
+    pids = uniq_pids
+    if not pids:
+        print("ERROR: pass at least one --pid / --pids", file=sys.stderr)
+        return 2
 
     script_path = args.script or _bundled_hooks_path()
     if not script_path or not os.path.isfile(script_path):
@@ -264,114 +293,144 @@ def main() -> int:
 
     bridge = BurpBridge(args.host, args.port)
     bridge.connect()
-    bridge.send_hello(args.pid)
+    bridge.send_hello(pids[0])
+    if len(pids) > 1:
+        bridge.send_event(f"multi-attach pids={pids}")
 
-    print(f"[*] Attaching to PID {args.pid}…", flush=True)
-    try:
-        session = frida.attach(args.pid)
-    except Exception as e:
-        print(f"[!] frida.attach failed: {e}", flush=True)
+    sessions: list[Any] = []
+    scripts: list[Any] = []
+
+    def make_on_message(pid: int, script_holder: list) -> Any:
+        def handle_packet(payload: Dict[str, Any]) -> None:
+            try:
+                payload["pid"] = pid
+                decision = bridge.request_decision(payload)
+                script_holder[0].post({"type": payload["id"], "payload": decision})
+            except Exception as e:
+                print(f"[!] packet worker error pid={pid}: {e}", flush=True)
+                try:
+                    script_holder[0].post(
+                        {
+                            "type": payload.get("id") or "unknown",
+                            "payload": {"action": "forward", "data": payload.get("data")},
+                        }
+                    )
+                except Exception:
+                    pass
+
+        def on_message(message: Dict[str, Any], data: Any) -> None:
+            if message.get("type") == "error":
+                print(f"[Frida error pid={pid}] {message}", file=sys.stderr, flush=True)
+                bridge.send_event(f"error pid={pid}: {message.get('description')}")
+                return
+            if message.get("type") != "send":
+                return
+            payload = message.get("payload")
+            if not isinstance(payload, dict):
+                return
+            ptype = payload.get("type")
+            if ptype == "event":
+                msg = str(payload.get("message") or "")
+                print(f"[event pid={pid}] {msg}", flush=True)
+                bridge.send_event(f"[pid {pid}] {msg}")
+                return
+            if ptype == "repeater_response":
+                data_bytes = bytes(payload.get("data") or [])
+                bridge._write(
+                    {
+                        "type": "repeater_response",
+                        "requestId": payload.get("requestId") or "",
+                        "peer": payload.get("peer") or "",
+                        "fd": payload.get("fd") or -1,
+                        "pid": pid,
+                        "data": base64.b64encode(data_bytes).decode("ascii"),
+                    }
+                )
+                return
+            if ptype == "packet":
+                threading.Thread(
+                    target=handle_packet,
+                    args=(payload,),
+                    name=f"packet-{pid}-{payload.get('id')}",
+                    daemon=True,
+                ).start()
+
+        return on_message
+
+    attached_pids: list[int] = []
+    for pid in pids:
+        print(f"[*] Attaching to PID {pid}…", flush=True)
+        try:
+            session = frida.attach(pid)
+        except Exception as e:
+            print(f"[!] frida.attach failed pid={pid}: {e}", flush=True)
+            bridge.send_event(f"attach failed pid={pid}: {e}")
+            continue
+        script_holder: list = [None]
+        script = session.create_script(source)
+        script_holder[0] = script
+        script.on("message", make_on_message(pid, script_holder))
+        try:
+            script.load()
+        except Exception as e:
+            print(f"[!] script.load failed pid={pid}: {e}", flush=True)
+            bridge.send_event(f"script.load failed pid={pid}: {e}")
+            try:
+                session.detach()
+            except Exception:
+                pass
+            continue
+        sessions.append(session)
+        scripts.append(script)
+        attached_pids.append(pid)
+        bridge.send_event(f"attached to pid {pid}")
+        print(f"[*] Hooked PID {pid}", flush=True)
+
+    if not attached_pids:
         bridge.close()
         return 3
 
-    script = session.create_script(source)
+    print(f"[*] Hooked PIDs {attached_pids}. Waiting for traffic…", flush=True)
+    bridge.send_event(f"hooked pids={attached_pids}")
 
-    def handle_packet(payload: Dict[str, Any]) -> None:
-        """Runs on a worker thread — must not run on Frida's message pump."""
+    def _exports_inject(script: Any, byte_list, peer, wait_response, request_id) -> Any:
         try:
-            payload["pid"] = args.pid
-            decision = bridge.request_decision(payload)
-            script.post({"type": payload["id"], "payload": decision})
-        except Exception as e:
-            print(f"[!] packet worker error: {e}", flush=True)
+            return script.exports_sync.inject(byte_list, peer, wait_response, request_id)
+        except TypeError:
             try:
-                script.post(
-                    {
-                        "type": payload.get("id") or "unknown",
-                        "payload": {"action": "forward", "data": payload.get("data")},
-                    }
-                )
-            except Exception:
-                pass
-
-    def on_message(message: Dict[str, Any], data: Any) -> None:
-        if message.get("type") == "error":
-            print(f"[Frida error] {message}", file=sys.stderr, flush=True)
-            bridge.send_event(f"error: {message.get('description')}")
-            return
-        if message.get("type") != "send":
-            return
-        payload = message.get("payload")
-        if not isinstance(payload, dict):
-            return
-        ptype = payload.get("type")
-        if ptype == "event":
-            print(f"[event] {payload.get('message')}", flush=True)
-            bridge.send_event(str(payload.get("message") or ""))
-            return
-        if ptype == "repeater_response":
-            data_bytes = bytes(payload.get("data") or [])
-            bridge._write(
-                {
-                    "type": "repeater_response",
-                    "requestId": payload.get("requestId") or "",
-                    "peer": payload.get("peer") or "",
-                    "fd": payload.get("fd") or -1,
-                    "data": base64.b64encode(data_bytes).decode("ascii"),
-                }
-            )
-            return
-        if ptype == "packet":
-            # CRITICAL: do not block Frida's message thread on Burp I/O
-            threading.Thread(
-                target=handle_packet,
-                args=(payload,),
-                name=f"packet-{payload.get('id')}",
-                daemon=True,
-            ).start()
-            return
-
-    script.on("message", on_message)
+                return script.exports_sync.inject(byte_list, peer, wait_response)
+            except TypeError:
+                return script.exports_sync.inject(byte_list, peer)
 
     def handle_inject(
         byte_list, peer: str, wait_response: bool = True, request_id: str = ""
     ) -> None:
-        try:
-            rc = script.exports_sync.inject(byte_list, peer, wait_response, request_id)
-            bridge.send_event(
-                f"inject result={rc} ({len(byte_list)} bytes) "
-                f"waitResponse={wait_response} requestId={request_id}"
-            )
-        except TypeError:
+        # Fan-out: only the process that owns the peer/last socket will send usefully.
+        for script, pid in zip(scripts, attached_pids):
             try:
-                rc = script.exports_sync.inject(byte_list, peer, wait_response)
-                bridge.send_event(f"inject result={rc} ({len(byte_list)} bytes)")
-            except TypeError:
-                try:
-                    rc = script.exports_sync.inject(byte_list, peer)
-                    bridge.send_event(f"inject result={rc} ({len(byte_list)} bytes)")
-                except Exception as e:
-                    bridge.send_event(f"inject failed: {e}")
+                rc = _exports_inject(script, byte_list, peer, wait_response, request_id)
+                bridge.send_event(
+                    f"inject pid={pid} result={rc} ({len(byte_list)} bytes) "
+                    f"waitResponse={wait_response} requestId={request_id}"
+                )
             except Exception as e:
-                bridge.send_event(f"inject failed: {e}")
-        except Exception as e:
-            bridge.send_event(f"inject failed: {e}")
+                bridge.send_event(f"inject failed pid={pid}: {e}")
 
     def handle_config(cfg: Dict[str, Any]) -> None:
-        try:
-            script.exports_sync.configure(
-                {
-                    "hookSend": bool(cfg.get("hookSend", True)),
-                    "hookRecv": bool(cfg.get("hookRecv", True)),
-                    "modeProxyForce": bool(cfg.get("modeProxyForce", True)),
-                    "modeSocketMirage": bool(cfg.get("modeSocketMirage", True)),
-                    "modeTlsUnpin": bool(cfg.get("modeTlsUnpin", True)),
-                    "burpProxyHost": cfg.get("burpProxyHost") or "127.0.0.1",
-                    "burpProxyPort": int(cfg.get("burpProxyPort") or 8800),
-                }
-            )
-        except Exception as e:
-            bridge.send_event(f"config failed: {e}")
+        body = {
+            "hookSend": bool(cfg.get("hookSend", True)),
+            "hookRecv": bool(cfg.get("hookRecv", True)),
+            "modeProxyForce": bool(cfg.get("modeProxyForce", True)),
+            "modeSocketMirage": bool(cfg.get("modeSocketMirage", True)),
+            "modeTlsUnpin": bool(cfg.get("modeTlsUnpin", True)),
+            "burpProxyHost": cfg.get("burpProxyHost") or "127.0.0.1",
+            "burpProxyPort": int(cfg.get("burpProxyPort") or 8800),
+        }
+        for script, pid in zip(scripts, attached_pids):
+            try:
+                script.exports_sync.configure(body)
+            except Exception as e:
+                bridge.send_event(f"config failed pid={pid}: {e}")
 
     bridge.on_inject(handle_inject)
     bridge.on_config(handle_config)
@@ -383,15 +442,17 @@ def main() -> int:
         if cleaned.is_set():
             return
         cleaned.set()
-        print(f"[*] Cleaning up Frida session ({reason})…", flush=True)
-        try:
-            script.unload()
-        except Exception:
-            pass
-        try:
-            session.detach()
-        except Exception:
-            pass
+        print(f"[*] Cleaning up Frida sessions ({reason})…", flush=True)
+        for script in scripts:
+            try:
+                script.unload()
+            except Exception:
+                pass
+        for session in sessions:
+            try:
+                session.detach()
+            except Exception:
+                pass
         try:
             bridge.send_event("detached")
         except Exception:
@@ -404,16 +465,6 @@ def main() -> int:
 
     bridge.on_detach(handle_detach)
 
-    try:
-        script.load()
-    except Exception as e:
-        print(f"[!] script.load failed: {e}", flush=True)
-        bridge.close()
-        return 4
-
-    bridge.send_event(f"attached to pid {args.pid}")
-    print(f"[*] Hooked PID {args.pid}. Waiting for traffic…", flush=True)
-
     exit_reason = "unknown"
     try:
         while not stop.is_set():
@@ -424,17 +475,22 @@ def main() -> int:
             if not bridge.alive:
                 exit_reason = "bridge_disconnected"
                 print("[!] Exit reason: Burp bridge disconnected", flush=True)
-                # Try to keep Frida session for a moment (diagnostics), then leave
                 break
-            try:
-                detached = session.is_detached
-            except Exception as e:
-                exit_reason = f"session_check_error:{e}"
-                print(f"[!] Exit reason: {exit_reason}", flush=True)
-                break
-            if detached:
+            alive_any = False
+            for session in sessions:
+                try:
+                    if not session.is_detached:
+                        alive_any = True
+                        break
+                except Exception:
+                    pass
+            if not alive_any:
                 exit_reason = "session_detached"
-                print("[!] Exit reason: Frida session detached (target quit or agent died)", flush=True)
+                print(
+                    "[!] Exit reason: all Frida sessions detached "
+                    "(targets quit or agents died)",
+                    flush=True,
+                )
                 break
             time.sleep(0.5)
     except KeyboardInterrupt:
