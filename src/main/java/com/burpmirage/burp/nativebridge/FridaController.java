@@ -94,6 +94,7 @@ public final class FridaController implements AutoCloseable {
         }
         detach();
 
+        ensureBridgeListening();
         ensureScriptsExtracted();
 
         Path hooksJs = workDir.resolve("hooks.js");
@@ -112,14 +113,14 @@ public final class FridaController implements AutoCloseable {
         String python = settings.pythonPath();
         boolean pythonOk = PythonDetector.hasFrida(python);
 
-        // Prefer one Python process with --pids; otherwise fan out one standalone host per PID.
-        if (multi && bridgeExe != null && !pythonOk) {
+        // Prefer standalone fan-out for multi-PID (Python --pids often hangs on Electron attach).
+        if (multi && bridgeExe != null) {
             startStandaloneFanout(bridgeExe, hooksJs, processes, pidCsv.toString());
             return;
         }
 
         List<String> cmd = new ArrayList<>();
-        if (bridgeExe != null && !multi) {
+        if (bridgeExe != null) {
             cmd.add(bridgeExe.toAbsolutePath().toString());
             status("Using standalone bridge: " + bridgeExe.toAbsolutePath());
         } else {
@@ -385,6 +386,22 @@ public final class FridaController implements AutoCloseable {
         } else {
             status("Detached Frida host (session unloaded)");
         }
+    }
+
+    private void ensureBridgeListening() throws IOException {
+        BridgeServer bridge = bridgeServer;
+        if (bridge == null) {
+            throw new IOException("BridgeServer is not set — reload the BurpMirage extension");
+        }
+        bridge.ensureListening();
+        if (!bridge.isListening()) {
+            throw new IOException(
+                    "BurpMirage bridge is not listening on 127.0.0.1:" + settings.bridgePort()
+                            + ".\nOpen Settings → Start Bridge, or reload the extension.\n"
+                            + "Frida host error 'Could not connect to Burp bridge: timed out' means this."
+            );
+        }
+        status("Bridge OK on 127.0.0.1:" + settings.bridgePort());
     }
 
     private synchronized void ensureScriptsExtracted() throws IOException {

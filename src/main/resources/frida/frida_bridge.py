@@ -357,11 +357,33 @@ def main() -> int:
 
         return on_message
 
+    def attach_pid(pid: int, timeout_sec: float = 12.0) -> Any:
+        """frida.attach can hang on sandboxed Electron PIDs — bound it."""
+        box: Dict[str, Any] = {}
+
+        def _run() -> None:
+            try:
+                box["session"] = frida.attach(pid)
+            except Exception as e:  # noqa: BLE001
+                box["error"] = e
+
+        t = threading.Thread(target=_run, name=f"frida-attach-{pid}", daemon=True)
+        t.start()
+        t.join(timeout_sec)
+        if t.is_alive():
+            raise TimeoutError(
+                f"frida.attach({pid}) timed out after {timeout_sec}s "
+                "(Electron sandbox / need Administrator?)"
+            )
+        if "error" in box:
+            raise box["error"]
+        return box["session"]
+
     attached_pids: list[int] = []
     for pid in pids:
         print(f"[*] Attaching to PID {pid}…", flush=True)
         try:
-            session = frida.attach(pid)
+            session = attach_pid(pid)
         except Exception as e:
             print(f"[!] frida.attach failed pid={pid}: {e}", flush=True)
             bridge.send_event(f"attach failed pid={pid}: {e}")

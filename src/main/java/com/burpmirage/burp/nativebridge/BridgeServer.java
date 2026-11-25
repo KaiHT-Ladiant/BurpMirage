@@ -81,8 +81,12 @@ public final class BridgeServer implements AutoCloseable {
     }
 
     public synchronized void start() throws IOException {
-        if (running.get()) {
+        if (isListening()) {
             return;
+        }
+        // Stale "running" with a dead socket — restart cleanly.
+        if (running.get()) {
+            stopQuiet();
         }
         serverSocket = new ServerSocket(settings.bridgePort(), 50, InetAddress.getByName("127.0.0.1"));
         running.set(true);
@@ -90,7 +94,25 @@ public final class BridgeServer implements AutoCloseable {
         acceptPool.submit(this::acceptLoop);
     }
 
+    /**
+     * Make sure the Frida TCP bridge is actually accepting connections.
+     * Call before every inject — avoids "Could not connect to Burp bridge: timed out".
+     */
+    public synchronized void ensureListening() throws IOException {
+        if (isListening()) {
+            return;
+        }
+        status("Bridge not listening on 127.0.0.1:" + settings.bridgePort() + " — restarting");
+        stopQuiet();
+        start();
+    }
+
     public synchronized void stop() {
+        stopQuiet();
+        status("Bridge stopped");
+    }
+
+    private void stopQuiet() {
         running.set(false);
         try {
             if (serverSocket != null) {
@@ -98,12 +120,16 @@ public final class BridgeServer implements AutoCloseable {
             }
         } catch (IOException ignored) {
         }
+        serverSocket = null;
         clients.clear();
-        status("Bridge stopped");
     }
 
     public boolean isRunning() {
-        return running.get();
+        return isListening();
+    }
+
+    public boolean isListening() {
+        return running.get() && serverSocket != null && !serverSocket.isClosed();
     }
 
     public boolean hasClient() {

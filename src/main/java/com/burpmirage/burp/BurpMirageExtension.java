@@ -53,8 +53,10 @@ public final class BurpMirageExtension implements BurpExtension {
         frida = new FridaController(settings, api.logging());
         frida.setBridgeServer(bridge);
 
+        boolean bridgeOk = false;
         try {
             bridge.start();
+            bridgeOk = bridge.isListening();
         } catch (Exception e) {
             api.logging().logToError(I18n.format("ext.bridge_error", settings.bridgePort(), e.getMessage()));
         }
@@ -76,6 +78,10 @@ public final class BurpMirageExtension implements BurpExtension {
             }
         });
 
-        api.logging().logToOutput(I18n.format("ext.ready", settings.bridgePort()));
+        if (bridgeOk) {
+            api.logging().logToOutput(I18n.format("ext.ready", settings.bridgePort()));
+        } else {
+            api.logging().logToError(I18n.format("ext.bridge_not_listening", settings.bridgePort()));
+        }
     }
 }
