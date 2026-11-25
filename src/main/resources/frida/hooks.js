@@ -24,6 +24,7 @@ var socketHooksInstalled = false;
 var tlsUnpinInstalled = false;
 var tlsUnpinHooked = {};
 var socketHandles = {}; // HANDLE/SOCKET string keys — Chromium often uses WriteFile/ReadFile on sockets
+var pendingOverlappedReads = {}; // overlapped ptr -> { h, buf }
 // BoringSSL: enum ssl_verify_result_t { ssl_verify_ok = 0, ssl_verify_invalid = 1, ssl_verify_retry = 2 }
 var boringSslVerifyOk = null;
 
@@ -302,6 +303,7 @@ function hookSendLike(name) {
       this.len = args[2].toInt32();
       this.drop = false;
       lastSocketFd = this.fd;
+      noteSocketHandle(args[0]);
 
       if (!hooked.send || this.len <= 0) {
         return;
@@ -337,6 +339,7 @@ function hookRecvLike(name) {
       this.fd = args[0].toInt32();
       this.buf = args[1];
       lastSocketFd = this.fd;
+      noteSocketHandle(args[0]);
     },
     onLeave: function (retval) {
       if (!hooked.recv) {
@@ -380,6 +383,7 @@ function hookWSARecv() {
       this.lpBytes = args[3];
       this.lpOverlapped = args[5];
       lastSocketFd = this.s;
+      noteSocketHandle(args[0]);
       // Overlapped / IOCP path: bytes not ready onLeave — skip intercept for now
       this.async = !this.lpOverlapped.isNull();
     },
@@ -719,7 +723,7 @@ function installTlsUnpin() {
     message: 'Mode C TLS Unpin armed — boringSslExports=' + boring
         + ' CertVerifyChain=' + schannel
         + ' WinVerifyTrust=' + wintrust
-        + ' | Chromium: inject NetworkService/Main + proxy to Burp; pin/custom-verify bypassed when hooked'
+        + ' | Chromium: use Inject Group (Renderer/Main/NetworkService); pin/custom-verify bypassed when hooked'
   });
 }
 
@@ -916,6 +920,7 @@ function installSocketHooks() {
         if (!hooked.send) return;
         this.s = args[0].toInt32();
         lastSocketFd = this.s;
+        noteSocketHandle(args[0]);
         var lpBuffers = args[1];
         var count = args[2].toInt32();
         if (count < 1) return;
@@ -966,6 +971,32 @@ function isTrackedSocketHandle(h) {
   }
 }
 
+/** Soft probe: treat HANDLE as SOCKET if getsockopt(SO_TYPE) succeeds (covers pre-attach sockets). */
+function ensureSocketHandle(h) {
+  if (isTrackedSocketHandle(h)) {
+    return true;
+  }
+  try {
+    var addr = resolveExport('getsockopt');
+    if (addr === null) {
+      return false;
+    }
+    if (!ensureSocketHandle._fn) {
+      ensureSocketHandle._fn = new NativeFunction(addr, 'int', ['pointer', 'int', 'int', 'pointer', 'pointer']);
+    }
+    var optval = Memory.alloc(4);
+    var optlen = Memory.alloc(4);
+    optlen.writeS32(4);
+    // SOL_SOCKET=0xffff, SO_TYPE=0x1008
+    var rc = ensureSocketHandle._fn(h, 0xffff, 0x1008, optval, optlen);
+    if (rc === 0) {
+      noteSocketHandle(h);
+      return true;
+    }
+  } catch (e) {}
+  return false;
+}
+
 function trackSocketConstructors() {
   ['socket', 'WSASocketW', 'WSASocketA', 'accept', 'WSAAccept'].forEach(function (name) {
     var addr = resolveExport(name);
@@ -1002,14 +1033,14 @@ function installSocketFileIoHooks() {
         }
         this.skip = false;
         this.h = args[0];
-        if (!isTrackedSocketHandle(this.h)) {
+        if (!ensureSocketHandle(this.h)) {
           this.skip = true;
           return;
         }
         this.buf = args[1];
         this.len = args[2].toInt32();
         if (this.len <= 0) return;
-        // Use handle numeric as fake fd for peerOf fallback
+        // Buffer is valid onEnter even for OVERLAPPED writes
         var fd = this.h.toInt32();
         lastSocketFd = fd;
         var decision = requestDecision('send', name, fd, this.buf, this.len);
@@ -1039,9 +1070,19 @@ function installSocketFileIoHooks() {
         this.lpRead = args[3];
         this.overlapped = args[4];
         this.async = this.overlapped && !this.overlapped.isNull();
-        this.skip = !hooked.recv || !isTrackedSocketHandle(this.h) || this.async;
-        if (!this.skip) {
-          lastSocketFd = this.h.toInt32();
+        this.skip = !hooked.recv || !ensureSocketHandle(this.h);
+        if (this.skip) {
+          return;
+        }
+        lastSocketFd = this.h.toInt32();
+        if (this.async) {
+          try {
+            pendingOverlappedReads[this.overlapped.toString()] = {
+              h: this.h,
+              buf: this.buf
+            };
+          } catch (e) {}
+          this.skip = true; // completion via GetOverlappedResult / WSAGetOverlappedResult
         }
       },
       onLeave: function (retval) {
@@ -1070,9 +1111,57 @@ function installSocketFileIoHooks() {
     console.log('[BurpMirage] hooked ' + name + ' (socket handles)');
   }
 
+  function finishOverlappedRead(apiName, hFile, lpOverlapped, lpTransferred, success) {
+    if (!hooked.recv || !success || !lpOverlapped || lpOverlapped.isNull()) {
+      return;
+    }
+    var key = lpOverlapped.toString();
+    var pending = pendingOverlappedReads[key];
+    if (!pending) {
+      return;
+    }
+    delete pendingOverlappedReads[key];
+    var got = 0;
+    try {
+      if (lpTransferred && !lpTransferred.isNull()) {
+        got = lpTransferred.readU32();
+      }
+    } catch (e) {
+      return;
+    }
+    if (got <= 0) {
+      return;
+    }
+    var fd = pending.h.toInt32();
+    lastSocketFd = fd;
+    var decision = requestDecision('recv', apiName, fd, pending.buf, got);
+    applyInPlace(pending.buf, got, decision);
+  }
+
+  function hookGetOverlappedResult(name, mod) {
+    var addr = resolveModExport(mod, name);
+    if (addr === null) return;
+    Interceptor.attach(addr, {
+      onEnter: function (args) {
+        this.h = args[0];
+        this.ov = args[1];
+        this.transferred = args[2];
+      },
+      onLeave: function (retval) {
+        finishOverlappedRead(name, this.h, this.ov, this.transferred, retval.toInt32() !== 0);
+      }
+    });
+    console.log('[BurpMirage] hooked ' + name + ' (overlapped read)');
+  }
+
   hookWrite('WriteFile');
   hookWrite('WriteFileEx');
   hookRead('ReadFile');
+  hookGetOverlappedResult('GetOverlappedResult', k32);
+  var ws2 = getWs2();
+  if (ws2) {
+    hookGetOverlappedResult('WSAGetOverlappedResult', ws2);
+  }
 }
 
 function install() {

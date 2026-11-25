@@ -63,6 +63,7 @@ public final class ProcessRole {
     }
 
     /** @deprecated use {@link #inCaptureGroup(String)} */
+    @Deprecated
     public static boolean recommendedForHttp(String role) {
         return inCaptureGroup(role);
     }

@@ -3,7 +3,7 @@ plugins {
 }
 
 group = "com.burpmirage"
-version = "1.2.1"
+version = "1.3.0"
 
 java {
     sourceCompatibility = JavaVersion.VERSION_17
