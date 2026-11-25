@@ -628,6 +628,93 @@ function scanBoringSslHooks() {
   return count;
 }
 
+var sslIoHookCount = 0;
+
+/**
+ * Mode B at TLS layer — Chromium often never hits ws2 send() with plaintext.
+ * SSL_write/SSL_read (BoringSSL) feeds Mirage History even when sockets use IOCP.
+ */
+function installSslTrafficHooks() {
+  var mods = chromiumCandidateModules();
+  var before = sslIoHookCount;
+  for (var i = 0; i < mods.length; i++) {
+    sslIoHookCount += hookSslWriteLike(mods[i], 'SSL_write');
+    sslIoHookCount += hookSslReadLike(mods[i], 'SSL_read');
+  }
+  var added = sslIoHookCount - before;
+  if (added > 0) {
+    send({ type: 'event', message: 'Mode B SSL_read/write hooks +' + added + ' (total=' + sslIoHookCount + ') pid=' + Process.id });
+  }
+  return added;
+}
+
+function hookSslWriteLike(mod, exportName) {
+  var addrs = findSymbolAddresses(mod, exportName);
+  if (!addrs.length) return 0;
+  var n = 0;
+  for (var i = 0; i < addrs.length; i++) {
+    var key = mod.name + '!' + exportName + '@' + addrs[i] + '#io';
+    if (!markTlsHook(key)) continue;
+    Interceptor.attach(addrs[i], {
+      onEnter: function (args) {
+        if (!hooked.send || suppressHook) {
+          this.skip = true;
+          return;
+        }
+        this.skip = false;
+        this.buf = args[1];
+        this.len = args[2].toInt32();
+        if (this.len <= 0) return;
+        var decision = requestDecision('send', exportName, -1, this.buf, this.len);
+        var applied = applyInPlace(this.buf, this.len, decision);
+        this.drop = applied.drop;
+        if (!this.drop && decision && decision.data) {
+          args[2] = ptr(applied.length);
+        }
+      },
+      onLeave: function (retval) {
+        if (this.skip) return;
+        if (this.drop) {
+          retval.replace(0);
+        }
+      }
+    });
+    console.log('[BurpMirage] hooked ' + key);
+    n++;
+  }
+  return n;
+}
+
+function hookSslReadLike(mod, exportName) {
+  var addrs = findSymbolAddresses(mod, exportName);
+  if (!addrs.length) return 0;
+  var n = 0;
+  for (var i = 0; i < addrs.length; i++) {
+    var key = mod.name + '!' + exportName + '@' + addrs[i] + '#io';
+    if (!markTlsHook(key)) continue;
+    Interceptor.attach(addrs[i], {
+      onEnter: function (args) {
+        this.buf = args[1];
+      },
+      onLeave: function (retval) {
+        if (!hooked.recv) return;
+        var got = retval.toInt32();
+        if (got <= 0) return;
+        var decision = requestDecision('recv', exportName, -1, this.buf, got);
+        var applied = applyInPlace(this.buf, got, decision);
+        if (applied.drop) {
+          retval.replace(0);
+        } else if (decision && decision.data) {
+          retval.replace(applied.length);
+        }
+      }
+    });
+    console.log('[BurpMirage] hooked ' + key);
+    n++;
+  }
+  return n;
+}
+
 function hookCertVerifyCertificateChainPolicy() {
   var mod = Process.findModuleByName('crypt32.dll');
   if (!mod) return false;
@@ -685,6 +772,9 @@ function armTlsUnpinLateLoad() {
           scanBoringSslHooks();
           hookCertVerifyCertificateChainPolicy();
           hookWinVerifyTrust();
+          if (modeSocketMirage) {
+            installSslTrafficHooks();
+          }
         } catch (e) {}
       }
     });
@@ -1178,6 +1268,22 @@ function install() {
   }
   if (modeSocketMirage) {
     installSocketHooks();
+    try {
+      installSslTrafficHooks();
+    } catch (eSsl) {
+      send({ type: 'event', message: 'Mode B SSL_io hook error: ' + eSsl });
+    }
+    // Chromium may load chrome.dll late — retry SSL hooks a few times.
+    var sslRetries = 0;
+    var sslTimer = setInterval(function () {
+      sslRetries++;
+      try {
+        installSslTrafficHooks();
+      } catch (e2) {}
+      if (sslIoHookCount > 0 || sslRetries >= 15) {
+        clearInterval(sslTimer);
+      }
+    }, 1000);
   }
   if (modeTlsUnpin) {
     installTlsUnpin();

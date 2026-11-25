@@ -22,7 +22,10 @@ import javax.swing.table.TableRowSorter;
 import java.awt.BorderLayout;
 import java.awt.Dimension;
 import java.awt.FlowLayout;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.function.Consumer;
 
 /**
@@ -65,7 +68,8 @@ public final class ProcessSelectorPanel extends JPanel {
             }
         };
         table = new JTable(model);
-        table.setSelectionMode(ListSelectionModel.SINGLE_SELECTION);
+        // Ctrl/Shift multi-select — Inject Group also expands Chromium siblings from a seed.
+        table.setSelectionMode(ListSelectionModel.MULTIPLE_INTERVAL_SELECTION);
         table.setAutoCreateRowSorter(true);
         sorter = new TableRowSorter<>(model);
         table.setRowSorter(sorter);
@@ -211,35 +215,65 @@ public final class ProcessSelectorPanel extends JPanel {
     }
 
     private void injectSelected(boolean group) {
-        int viewRow = table.getSelectedRow();
-        if (viewRow < 0) {
+        int[] viewRows = table.getSelectedRows();
+        if (viewRows.length == 0) {
             JOptionPane.showMessageDialog(this, I18n.get("process.select_first"), I18n.get("app.name"), JOptionPane.WARNING_MESSAGE);
             return;
         }
-        int modelRow = table.convertRowIndexToModel(viewRow);
-        int pid = (Integer) model.getValueAt(modelRow, 0);
-        ProcessInfo info = cache.stream().filter(p -> p.pid() == pid).findFirst().orElse(null);
-        if (info == null) {
-            info = new ProcessInfo(pid, String.valueOf(model.getValueAt(modelRow, 1)),
-                    String.valueOf(model.getValueAt(modelRow, 4)),
-                    String.valueOf(model.getValueAt(modelRow, 3)),
-                    "");
+
+        List<ProcessInfo> selected = new ArrayList<>();
+        for (int viewRow : viewRows) {
+            int modelRow = table.convertRowIndexToModel(viewRow);
+            int pid = (Integer) model.getValueAt(modelRow, 0);
+            ProcessInfo info = cache.stream().filter(p -> p.pid() == pid).findFirst().orElse(null);
+            if (info == null) {
+                info = new ProcessInfo(pid, String.valueOf(model.getValueAt(modelRow, 1)),
+                        String.valueOf(model.getValueAt(modelRow, 4)),
+                        String.valueOf(model.getValueAt(modelRow, 3)),
+                        "");
+            }
+            selected.add(info);
         }
 
-        ProcessInfo seed = info;
-        java.util.List<ProcessInfo> targets = group
-                ? ProcessCaptureGroup.related(seed, cache)
-                : java.util.List.of(seed);
+        ProcessInfo seed = selected.get(0);
+        List<ProcessInfo> targets;
+        if (!group) {
+            targets = List.copyOf(selected);
+        } else if (selected.size() > 1) {
+            // Explicit multi-select: use those PIDs, still pull in ★ siblings of the same image.
+            Map<Integer, ProcessInfo> uniq = new LinkedHashMap<>();
+            for (ProcessInfo s : selected) {
+                uniq.put(s.pid(), s);
+                for (ProcessInfo rel : ProcessCaptureGroup.related(s, cache)) {
+                    uniq.putIfAbsent(rel.pid(), rel);
+                }
+            }
+            targets = List.copyOf(uniq.values());
+        } else {
+            targets = ProcessCaptureGroup.related(seed, cache);
+        }
         if (targets.isEmpty()) {
-            targets = java.util.List.of(seed);
+            targets = List.of(seed);
         }
 
         String pidList = targets.stream()
-                .map(p -> Integer.toString(p.pid()))
-                .reduce((a, b) -> a + "," + b)
+                .map(p -> p.pid() + (p.role().isBlank() ? "" : "/" + p.role()))
+                .reduce((a, b) -> a + ", " + b)
                 .orElse(Integer.toString(seed.pid()));
+
+        int confirm = JOptionPane.showConfirmDialog(
+                this,
+                I18n.format("process.confirm_inject", targets.size(), pidList),
+                I18n.get("app.name"),
+                JOptionPane.OK_CANCEL_OPTION,
+                JOptionPane.QUESTION_MESSAGE
+        );
+        if (confirm != JOptionPane.OK_OPTION) {
+            return;
+        }
+
         statusLabel.setText(I18n.format("process.injecting_group", targets.size(), pidList));
-        java.util.List<ProcessInfo> finalTargets = targets;
+        List<ProcessInfo> finalTargets = targets;
         new SwingWorker<Void, Void>() {
             @Override
             protected Void doInBackground() throws Exception {

@@ -42,6 +42,54 @@ public final class ProcessEnumerator {
     }
 
     private static Map<Integer, Integer> countTcpByPid() {
+        // netstat is more reliable from Burp's JVM (Get-NetTCPConnection often needs elevation).
+        Map<Integer, Integer> viaNetstat = countTcpByPidNetstat();
+        if (!viaNetstat.isEmpty()) {
+            return viaNetstat;
+        }
+        return countTcpByPidPowerShell();
+    }
+
+    private static Map<Integer, Integer> countTcpByPidNetstat() {
+        Map<Integer, Integer> counts = new LinkedHashMap<>();
+        try {
+            ProcessBuilder pb = new ProcessBuilder("netstat.exe", "-ano", "-p", "tcp");
+            pb.redirectErrorStream(true);
+            Process process = pb.start();
+            try (BufferedReader reader = new BufferedReader(
+                    new InputStreamReader(process.getInputStream(), windowsConsoleCharset()))) {
+                String line;
+                while ((line = reader.readLine()) != null) {
+                    String t = line.trim();
+                    if (t.isEmpty()) {
+                        continue;
+                    }
+                    String upper = t.toUpperCase(Locale.ROOT);
+                    // TCP  1.2.3.4:443  5.6.7.8:12345  ESTABLISHED  22044
+                    if (!upper.startsWith("TCP")) {
+                        continue;
+                    }
+                    if (!upper.contains("ESTABLISHED") && !upper.contains("LISTENING") && !upper.contains("LISTEN")) {
+                        continue;
+                    }
+                    String[] parts = t.split("\\s+");
+                    if (parts.length < 5) {
+                        continue;
+                    }
+                    int pid = parseInt(parts[parts.length - 1]);
+                    if (pid > 0) {
+                        counts.merge(pid, 1, Integer::sum);
+                    }
+                }
+            }
+            process.waitFor();
+        } catch (Exception ignored) {
+            return Map.of();
+        }
+        return counts;
+    }
+
+    private static Map<Integer, Integer> countTcpByPidPowerShell() {
         Map<Integer, Integer> counts = new LinkedHashMap<>();
         try {
             ProcessBuilder pb = new ProcessBuilder(

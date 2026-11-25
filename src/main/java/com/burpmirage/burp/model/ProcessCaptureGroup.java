@@ -91,20 +91,32 @@ public final class ProcessCaptureGroup {
             }
         }
 
+        boolean hasSeed = false;
+        for (ProcessInfo p : picked) {
+            if (p.pid() == seed.pid()) {
+                hasSeed = true;
+                break;
+            }
+        }
+        if (!hasSeed) {
+            picked.add(seed);
+        }
+
         // Prefer live socket owners first, then role priority
         picked.sort(Comparator
                 .comparingInt(ProcessInfo::tcpSocketCount).reversed()
                 .thenComparingInt(p -> ProcessRole.capturePriority(p.role()))
                 .thenComparingInt(ProcessInfo::pid));
 
-        if (picked.size() > MAX_GROUP) {
-            return List.copyOf(picked.subList(0, MAX_GROUP));
-        }
         // Dedup by pid while preserving order
         Map<Integer, ProcessInfo> uniq = new LinkedHashMap<>();
         for (ProcessInfo p : picked) {
             uniq.putIfAbsent(p.pid(), p);
         }
-        return List.copyOf(uniq.values());
+        List<ProcessInfo> out = new ArrayList<>(uniq.values());
+        if (out.size() > MAX_GROUP) {
+            return List.copyOf(out.subList(0, MAX_GROUP));
+        }
+        return List.copyOf(out);
     }
 }
