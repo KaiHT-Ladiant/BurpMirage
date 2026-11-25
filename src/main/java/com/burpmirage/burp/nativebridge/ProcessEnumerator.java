@@ -69,10 +69,47 @@ public final class ProcessEnumerator {
         } catch (Exception ignored) {
             return List.of();
         }
-        result.sort(Comparator.comparing(ProcessInfo::name, String.CASE_INSENSITIVE_ORDER)
+        List<ProcessInfo> enriched = enrichChromiumMainRoles(result);
+        enriched.sort(Comparator.comparing(ProcessInfo::name, String.CASE_INSENSITIVE_ORDER)
                 .thenComparing(ProcessInfo::role, String.CASE_INSENSITIVE_ORDER)
                 .thenComparingInt(ProcessInfo::pid));
-        return result;
+        return enriched;
+    }
+
+    /**
+     * Electron/Chromium browser process often has a bare cmdline (exe only, no {@code --type=}).
+     * When siblings of the same path use {@code --type=}, label the bare one as Main.
+     */
+    private static List<ProcessInfo> enrichChromiumMainRoles(List<ProcessInfo> input) {
+        Map<String, List<ProcessInfo>> byKey = new LinkedHashMap<>();
+        for (ProcessInfo p : input) {
+            String key = (p.path() != null && !p.path().isBlank())
+                    ? p.path().toLowerCase(Locale.ROOT)
+                    : p.name().toLowerCase(Locale.ROOT);
+            byKey.computeIfAbsent(key, k -> new ArrayList<>()).add(p);
+        }
+        List<ProcessInfo> out = new ArrayList<>(input.size());
+        for (List<ProcessInfo> group : byKey.values()) {
+            boolean hasTypedChild = false;
+            for (ProcessInfo p : group) {
+                String cmd = p.displayCommandLine();
+                if (cmd.contains("--type=") || cmd.contains("--utility-sub-type=")) {
+                    hasTypedChild = true;
+                    break;
+                }
+            }
+            for (ProcessInfo p : group) {
+                if (hasTypedChild && p.role().isBlank()) {
+                    String cmd = p.displayCommandLine();
+                    if (!cmd.contains("--type=") && !cmd.contains("--utility-sub-type=")) {
+                        out.add(p.withRoleOverride("Main"));
+                        continue;
+                    }
+                }
+                out.add(p);
+            }
+        }
+        return out;
     }
 
     private List<ProcessInfo> listViaTasklist() {

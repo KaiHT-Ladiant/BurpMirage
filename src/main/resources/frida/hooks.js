@@ -127,7 +127,36 @@ function peerOf(fd) {
   }
 }
 
+/** Mode A→Burp hop: keep Mode B on for other TCP, but don't Mirage-intercept the proxy socket. */
+function isBurpProxyPeer(peer) {
+  if (!peer || peer.indexOf(':') < 0) {
+    return false;
+  }
+  var wantHost = ('' + burpProxyHost).toLowerCase();
+  var wantPort = '' + (burpProxyPort | 0);
+  var idx = peer.lastIndexOf(':');
+  var host = peer.substring(0, idx).toLowerCase();
+  var port = peer.substring(idx + 1);
+  if (port !== wantPort) {
+    return false;
+  }
+  if (host === wantHost) {
+    return true;
+  }
+  // localhost aliases
+  if ((wantHost === '127.0.0.1' || wantHost === 'localhost') &&
+      (host === '127.0.0.1' || host === 'localhost' || host === '::1')) {
+    return true;
+  }
+  return false;
+}
+
 function requestDecision(direction, api, fd, buf, length) {
+  var peer = peerOf(fd | 0);
+  // A+B together: HTTP via Burp stays in Proxy history; raw TCP still goes through Mirage.
+  if (isBurpProxyPeer(peer)) {
+    return { action: 'forward', data: null };
+  }
   var id = nextId();
   var bytes = readBytes(buf, length);
   var payload = {
@@ -135,7 +164,7 @@ function requestDecision(direction, api, fd, buf, length) {
     id: id,
     direction: direction,
     api: api,
-    peer: peerOf(fd | 0),
+    peer: peer,
     fd: fd | 0,
     data: bytes
   };
@@ -503,6 +532,7 @@ function chromiumCandidateModules() {
         || n === 'chrome.dll' || n === 'libcef.dll' || n === 'msedge.dll' || n === 'nw.dll'
         || n.indexOf('libcef') >= 0 || n.indexOf('chrome') >= 0
         || n.indexOf('msedge') >= 0 || n.indexOf('electron') >= 0
+        || n.indexOf('amaranth') >= 0 || n.indexOf('douzone') >= 0
         || n.indexOf('ssl') >= 0 || n.indexOf('boring') >= 0
         || n === 'libssl.dll' || n === 'ssleay32.dll' || n === 'libssl-1_1-x64.dll'
         || n === 'libssl-3.dll' || n === 'libssl-3-x64.dll';
@@ -514,15 +544,79 @@ function chromiumCandidateModules() {
   return out;
 }
 
+function findSymbolAddresses(mod, name) {
+  var addrs = [];
+  var exp = resolveModExport(mod, name);
+  if (exp !== null) addrs.push(exp);
+  try {
+    if (typeof mod.enumerateSymbols === 'function') {
+      var syms = mod.enumerateSymbols();
+      for (var i = 0; i < syms.length; i++) {
+        var s = syms[i];
+        if (s.name === name || (s.name && s.name.indexOf(name) !== -1)) {
+          addrs.push(s.address);
+        }
+      }
+    }
+  } catch (e) {}
+  try {
+    if (typeof DebugSymbol !== 'undefined' && DebugSymbol.findFunctionsMatching) {
+      var found = DebugSymbol.findFunctionsMatching('*' + name + '*');
+      for (var j = 0; j < found.length; j++) {
+        addrs.push(found[j]);
+      }
+    }
+  } catch (e2) {}
+  // de-dupe
+  var uniq = [];
+  var seen = {};
+  for (var k = 0; k < addrs.length; k++) {
+    var key = '' + addrs[k];
+    if (!seen[key]) {
+      seen[key] = true;
+      uniq.push(addrs[k]);
+    }
+  }
+  return uniq;
+}
+
+function hookBoringSslAtAddresses(mod, exportName, customVerify) {
+  var addrs = findSymbolAddresses(mod, exportName);
+  if (!addrs.length) return 0;
+  var n = 0;
+  for (var i = 0; i < addrs.length; i++) {
+    var key = mod.name + '!' + exportName + '@' + addrs[i];
+    if (!markTlsHook(key)) continue;
+    if (customVerify) {
+      var okCb = ensureBoringVerifyOkCallback();
+      Interceptor.attach(addrs[i], {
+        onEnter: function (args) {
+          args[2] = okCb;
+        }
+      });
+    } else {
+      Interceptor.attach(addrs[i], {
+        onEnter: function (args) {
+          args[1] = ptr(0);
+          args[2] = ptr(0);
+        }
+      });
+    }
+    console.log('[BurpMirage] TLS Unpin hooked ' + key);
+    n++;
+  }
+  return n;
+}
+
 function scanBoringSslHooks() {
   var count = 0;
   var mods = chromiumCandidateModules();
   for (var i = 0; i < mods.length; i++) {
     var mod = mods[i];
-    if (hookBoringSslSetCustomVerify(mod, 'SSL_CTX_set_custom_verify')) count++;
-    if (hookBoringSslSetCustomVerify(mod, 'SSL_set_custom_verify')) count++;
-    if (hookSslSetVerify(mod, 'SSL_CTX_set_verify')) count++;
-    if (hookSslSetVerify(mod, 'SSL_set_verify')) count++;
+    count += hookBoringSslAtAddresses(mod, 'SSL_CTX_set_custom_verify', true);
+    count += hookBoringSslAtAddresses(mod, 'SSL_set_custom_verify', true);
+    count += hookBoringSslAtAddresses(mod, 'SSL_CTX_set_verify', false);
+    count += hookBoringSslAtAddresses(mod, 'SSL_set_verify', false);
   }
   return count;
 }
@@ -592,7 +686,7 @@ function armTlsUnpinLateLoad() {
 
 /**
  * Mode C — TLS Unpin: accept Burp (or any) MITM cert for Chromium/BoringSSL + Schannel paths.
- * Does not by itself route traffic to Burp; combine with Mode A / system/--proxy-server.
+ * Does not by itself route traffic to Burp; combine with Mode A (process-local proxy fake).
  */
 function installTlsUnpin() {
   if (tlsUnpinInstalled) {
@@ -692,6 +786,71 @@ function installProxyForce() {
   hookInternetOpen('InternetOpenW', true);
   hookInternetOpen('InternetOpenA', false);
 
+  // Chromium/Electron: process-local only — hook Get* APIs inside this PID.
+  // Never call WinHttpSetDefaultProxyConfiguration (that is OS/user-wide).
+  function hookWinHttpIeProxyConfig() {
+    var mod = Process.findModuleByName('winhttp.dll');
+    if (!mod) return false;
+    var addr = resolveModExport(mod, 'WinHttpGetIEProxyConfigForCurrentUser');
+    if (addr === null) return false;
+    if (proxyFnsHooked['WinHttpGetIEProxyConfigForCurrentUser']) return true;
+    var proxyBuf = Memory.allocUtf16String(proxy);
+    var bypassBuf = Memory.allocUtf16String('localhost;127.*;<local>');
+    Interceptor.attach(addr, {
+      onEnter: function (args) {
+        this.cfg = args[0];
+      },
+      onLeave: function (retval) {
+        try {
+          if (this.cfg.isNull()) return;
+          // WINHTTP_CURRENT_USER_IE_PROXY_CONFIG
+          this.cfg.writeU32(0); // fAutoDetect = FALSE
+          this.cfg.add(Process.pointerSize).writePointer(ptr(0));
+          this.cfg.add(Process.pointerSize * 2).writePointer(proxyBuf);
+          this.cfg.add(Process.pointerSize * 3).writePointer(bypassBuf);
+          retval.replace(ptr(1));
+        } catch (e) {}
+      }
+    });
+    proxyFnsHooked['WinHttpGetIEProxyConfigForCurrentUser'] = true;
+    console.log('[BurpMirage] Proxy Force hooked WinHttpGetIEProxyConfigForCurrentUser -> ' + proxy);
+    return true;
+  }
+
+  function hookWinHttpDefaultProxy() {
+    var mod = Process.findModuleByName('winhttp.dll');
+    if (!mod) return false;
+    var addr = resolveModExport(mod, 'WinHttpGetDefaultProxyConfiguration');
+    if (addr === null) return false;
+    if (proxyFnsHooked['WinHttpGetDefaultProxyConfiguration']) return true;
+    var proxyBuf = Memory.allocUtf16String(proxy);
+    var bypassBuf = Memory.allocUtf16String('localhost;127.*;<local>');
+    Interceptor.attach(addr, {
+      onEnter: function (args) {
+        this.info = args[0];
+      },
+      onLeave: function (retval) {
+        try {
+          if (this.info.isNull()) return;
+          // WINHTTP_PROXY_INFO { DWORD dwAccessType; LPWSTR lpszProxy; LPWSTR lpszProxyBypass; }
+          this.info.writeU32(3); // NAMED_PROXY
+          this.info.add(Process.pointerSize).writePointer(proxyBuf);
+          this.info.add(Process.pointerSize * 2).writePointer(bypassBuf);
+          retval.replace(ptr(1));
+        } catch (e) {}
+      }
+    });
+    proxyFnsHooked['WinHttpGetDefaultProxyConfiguration'] = true;
+    console.log('[BurpMirage] Proxy Force hooked WinHttpGetDefaultProxyConfiguration -> ' + proxy);
+    return true;
+  }
+
+  var ieProxy = false;
+  var defProxy = false;
+  try { ieProxy = hookWinHttpIeProxyConfig(); } catch (e) {}
+  try { defProxy = hookWinHttpDefaultProxy(); } catch (e2) {}
+  if (ieProxy || defProxy) hookedAny = true;
+
   // Late-load: when winhttp/wininet appear, install again.
   var loaders = ['LoadLibraryW', 'LoadLibraryExW', 'LoadLibraryA', 'LoadLibraryExA'];
   loaders.forEach(function (ln) {
@@ -706,11 +865,12 @@ function installProxyForce() {
       onLeave: function (retval) {
         if (retval.isNull()) return;
         if (!proxyForceInstalled) return;
-        // Re-attempt hooks if DLLs just appeared
         try {
           hookWinHttpOpen('WinHttpOpen');
           hookInternetOpen('InternetOpenW', true);
           hookInternetOpen('InternetOpenA', false);
+          hookWinHttpIeProxyConfig();
+          hookWinHttpDefaultProxy();
         } catch (e) {}
       }
     });
@@ -720,7 +880,10 @@ function installProxyForce() {
   send({
     type: 'event',
     message: 'Mode A Proxy Force ' + (hookedAny ? 'active' : 'armed (waiting for WinHTTP/WinInet)')
-        + ' -> ' + proxy + ' (Burp Proxy). Install Burp CA for HTTPS.'
+        + ' -> ' + proxy
+        + ' ieProxyHook=' + ieProxy
+        + ' defaultProxyHook=' + defProxy
+        + ' (process-local only; does not change Windows system proxy)'
   });
 }
 

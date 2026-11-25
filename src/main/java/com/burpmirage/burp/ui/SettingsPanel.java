@@ -17,10 +17,12 @@ import javax.swing.JPanel;
 import javax.swing.JScrollPane;
 import javax.swing.JSpinner;
 import javax.swing.JTextField;
+import javax.swing.ScrollPaneConstants;
 import javax.swing.SpinnerNumberModel;
 import javax.swing.border.EmptyBorder;
 import javax.swing.border.TitledBorder;
 import java.awt.BorderLayout;
+import java.awt.Component;
 import java.awt.Dimension;
 import java.awt.GridBagConstraints;
 import java.awt.GridBagLayout;
@@ -102,18 +104,24 @@ public final class SettingsPanel extends JPanel {
         burpProxyHost.setText(settings.burpProxyHost());
         burpProxyPort.setValue(settings.burpProxyPort());
 
+        wrapCheckBox(modeProxyForce);
+        wrapCheckBox(modeSocketMirage);
+        wrapCheckBox(modeTlsUnpin);
+
         JPanel modes = new JPanel(new GridBagLayout());
         modes.setBorder(new TitledBorder(I18n.get("settings.modes")));
         GridBagConstraints m = new GridBagConstraints();
         m.insets = new Insets(4, 4, 4, 4);
         m.anchor = GridBagConstraints.WEST;
+        m.fill = GridBagConstraints.HORIZONTAL;
+        m.weightx = 1;
         m.gridx = 0; m.gridy = 0; m.gridwidth = 2;
         modes.add(modeProxyForce, m);
         m.gridy = 1;
         modes.add(modeSocketMirage, m);
         m.gridy = 2;
         modes.add(modeTlsUnpin, m);
-        m.gridy = 3; m.gridwidth = 1;
+        m.gridy = 3; m.gridwidth = 1; m.weightx = 0; m.fill = GridBagConstraints.NONE;
         modes.add(new JLabel(I18n.get("settings.burp_proxy_host")), m);
         m.gridx = 1; m.fill = GridBagConstraints.HORIZONTAL; m.weightx = 1;
         modes.add(burpProxyHost, m);
@@ -121,8 +129,8 @@ public final class SettingsPanel extends JPanel {
         modes.add(new JLabel(I18n.get("settings.burp_proxy_port")), m);
         m.gridx = 1; m.fill = GridBagConstraints.HORIZONTAL; m.weightx = 1;
         modes.add(burpProxyPort, m);
-        m.gridx = 0; m.gridy = 5; m.gridwidth = 2;
-        modes.add(new JLabel(I18n.get("settings.modes_hint")), m);
+        m.gridx = 0; m.gridy = 5; m.gridwidth = 2; m.weightx = 1;
+        modes.add(wrapLabel(I18n.get("settings.modes_hint")), m);
 
         JPanel hooks = new JPanel(new GridBagLayout());
         hooks.setBorder(new TitledBorder(I18n.get("settings.hooks")));
@@ -137,7 +145,7 @@ public final class SettingsPanel extends JPanel {
         h.gridy = 2;
         hooks.add(autoEmpty, h);
         h.gridy = 3;
-        hooks.add(new JLabel(I18n.get("settings.recv_note")), h);
+        hooks.add(wrapLabel(I18n.get("settings.recv_note")), h);
         h.gridy = 4;
         hooks.add(new JLabel(I18n.get("settings.find")), h);
         h.gridy = 5;
@@ -214,7 +222,16 @@ public final class SettingsPanel extends JPanel {
 
         JScrollPane scroll = new JScrollPane(stack);
         scroll.setBorder(null);
+        scroll.setHorizontalScrollBarPolicy(ScrollPaneConstants.HORIZONTAL_SCROLLBAR_NEVER);
         scroll.getVerticalScrollBar().setUnitIncrement(16);
+        // Keep content width = viewport so long mode labels wrap instead of side-scrolling.
+        scroll.getViewport().addChangeListener(e -> {
+            int w = scroll.getViewport().getWidth();
+            if (w > 0 && stack.getWidth() != w) {
+                stack.setPreferredSize(new Dimension(w, stack.getPreferredSize().height));
+                stack.revalidate();
+            }
+        });
         add(scroll, BorderLayout.CENTER);
         add(actions, BorderLayout.SOUTH);
 
@@ -230,10 +247,42 @@ public final class SettingsPanel extends JPanel {
                 Dimension pref = getPreferredSize();
                 return new Dimension(Integer.MAX_VALUE, pref.height);
             }
+
+            @Override
+            public Dimension getPreferredSize() {
+                Dimension pref = super.getPreferredSize();
+                Component parent = getParent();
+                while (parent != null && !(parent.getParent() instanceof javax.swing.JViewport)) {
+                    parent = parent.getParent();
+                }
+                if (parent != null && parent.getParent() instanceof javax.swing.JViewport vp) {
+                    int w = vp.getWidth();
+                    if (w > 0) {
+                        return new Dimension(w, pref.height);
+                    }
+                }
+                return pref;
+            }
         };
         wrap.add(inner, BorderLayout.CENTER);
         wrap.setAlignmentX(LEFT_ALIGNMENT);
         return wrap;
+    }
+
+    private static void wrapCheckBox(JCheckBox box) {
+        String text = box.getText();
+        if (text == null || text.isBlank() || text.startsWith("<html>")) {
+            return;
+        }
+        box.setText("<html><body style='width:420px'>" + escapeHtml(text) + "</body></html>");
+    }
+
+    private static JLabel wrapLabel(String text) {
+        return new JLabel("<html><body style='width:420px'>" + escapeHtml(text) + "</body></html>");
+    }
+
+    private static String escapeHtml(String s) {
+        return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;");
     }
 
     private int addRow(JPanel form, GridBagConstraints c, int row, String label, java.awt.Component field) {
