@@ -21,6 +21,12 @@ public final class ExtensionSettings {
     private String searchPattern = "";
     private String replacePattern = "";
     private Path logFile;
+    /** Mode A: force WinHTTP/WinInet named proxy to Burp. */
+    private boolean modeProxyForce = true;
+    /** Mode B: Winsock send/recv intercept (Mirage). */
+    private boolean modeSocketMirage = true;
+    private String burpProxyHost = "127.0.0.1";
+    private int burpProxyPort = 8800;
 
     public int bridgePort() {
         return bridgePort;
@@ -118,6 +124,40 @@ public final class ExtensionSettings {
         this.logFile = logFile;
     }
 
+
+    public boolean modeProxyForce() {
+        return modeProxyForce;
+    }
+
+    public void setModeProxyForce(boolean modeProxyForce) {
+        this.modeProxyForce = modeProxyForce;
+    }
+
+    public boolean modeSocketMirage() {
+        return modeSocketMirage;
+    }
+
+    public void setModeSocketMirage(boolean modeSocketMirage) {
+        this.modeSocketMirage = modeSocketMirage;
+    }
+
+    public String burpProxyHost() {
+        return burpProxyHost;
+    }
+
+    public void setBurpProxyHost(String burpProxyHost) {
+        this.burpProxyHost = burpProxyHost == null || burpProxyHost.isBlank()
+                ? "127.0.0.1" : burpProxyHost.trim();
+    }
+
+    public int burpProxyPort() {
+        return burpProxyPort;
+    }
+
+    public void setBurpProxyPort(int burpProxyPort) {
+        this.burpProxyPort = Math.max(1, Math.min(65535, burpProxyPort));
+    }
+
     public void load() {
         Preferences p = Preferences.userRoot().node(PREF_NODE);
         bridgePort = p.getInt("bridgePort", 27042);
@@ -129,6 +169,10 @@ public final class ExtensionSettings {
         fridaPath = p.get("fridaPath", "frida");
         pythonPath = p.get("pythonPath", "python");
         bridgeExePath = p.get("bridgeExePath", "");
+        modeProxyForce = p.getBoolean("modeProxyForce", true);
+        modeSocketMirage = p.getBoolean("modeSocketMirage", true);
+        burpProxyHost = p.get("burpProxyHost", "127.0.0.1");
+        burpProxyPort = p.getInt("burpProxyPort", 8800);
         String log = p.get("logFile", "");
         if (!log.isBlank()) {
             logFile = Path.of(log);
@@ -162,6 +206,10 @@ public final class ExtensionSettings {
         p.put("fridaPath", fridaPath);
         p.put("pythonPath", pythonPath);
         p.put("bridgeExePath", bridgeExePath);
+        p.putBoolean("modeProxyForce", modeProxyForce);
+        p.putBoolean("modeSocketMirage", modeSocketMirage);
+        p.put("burpProxyHost", burpProxyHost);
+        p.putInt("burpProxyPort", burpProxyPort);
         p.put("logFile", logFile == null ? "" : logFile.toString());
     }
 }

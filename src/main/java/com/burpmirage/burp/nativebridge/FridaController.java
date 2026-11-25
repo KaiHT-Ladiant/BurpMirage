@@ -257,7 +257,28 @@ public final class FridaController implements AutoCloseable {
             workDir.toFile().deleteOnExit();
         }
         copyResource("/frida/frida_bridge.py", workDir.resolve("frida_bridge.py"));
-        copyResource("/frida/hooks.js", workDir.resolve("hooks.js"));
+        writeHooksWithConfig(workDir.resolve("hooks.js"));
+    }
+
+    /** Extract hooks.js and prepend Mode A/B + Burp proxy settings (works with standalone bridge exe). */
+    private void writeHooksWithConfig(Path target) throws IOException {
+        String base;
+        try (InputStream in = FridaController.class.getResourceAsStream("/frida/hooks.js")) {
+            if (in == null) {
+                throw new IOException("Missing classpath resource: /frida/hooks.js");
+            }
+            base = new String(in.readAllBytes(), StandardCharsets.UTF_8);
+        }
+        String host = settings.burpProxyHost().replace("\\", "\\\\").replace("'", "");
+        String preamble = ""
+                + "var __BM_MODE_PROXY = " + settings.modeProxyForce() + ";\n"
+                + "var __BM_MODE_SOCKET = " + settings.modeSocketMirage() + ";\n"
+                + "var __BM_PROXY_HOST = '" + host + "';\n"
+                + "var __BM_PROXY_PORT = " + settings.burpProxyPort() + ";\n";
+        Files.writeString(target, preamble + base, StandardCharsets.UTF_8);
+        status("hooks.js modes: proxy=" + settings.modeProxyForce()
+                + " socket=" + settings.modeSocketMirage()
+                + " burp=" + settings.burpProxyHost() + ":" + settings.burpProxyPort());
     }
 
     /**

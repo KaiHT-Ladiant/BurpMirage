@@ -565,4 +565,53 @@ public final class HistoryPanel extends JPanel {
         }
         return "?";
     }
+
+    /**
+     * Highlight history rows whose payload contains {@code needle} (e.g. from PCAP).
+     * @return number of matching packets highlighted
+     */
+    public int highlightContaining(byte[] needle) {
+        if (needle == null || needle.length == 0) {
+            return 0;
+        }
+        int hits = 0;
+        int firstView = -1;
+        for (int i = 0; i < rows.size(); i++) {
+            InterceptedPacket pkt = rows.get(i);
+            if (contains(pkt.data(), needle) || contains(pkt.originalData(), needle)) {
+                highlightedIds.add(pkt.id());
+                hits++;
+                int view = table.convertRowIndexToView(i);
+                if (view >= 0 && firstView < 0) {
+                    firstView = view;
+                }
+            }
+        }
+        final int selectView = firstView;
+        SwingUtilities.invokeLater(() -> {
+            table.repaint();
+            if (selectView >= 0) {
+                table.setRowSelectionInterval(selectView, selectView);
+                table.scrollRectToVisible(table.getCellRect(selectView, 0, true));
+                showSelected();
+            }
+        });
+        return hits;
+    }
+
+    private static boolean contains(byte[] hay, byte[] needle) {
+        if (hay == null || needle == null || needle.length == 0 || hay.length < needle.length) {
+            return false;
+        }
+        outer:
+        for (int i = 0; i <= hay.length - needle.length; i++) {
+            for (int j = 0; j < needle.length; j++) {
+                if (hay[i + j] != needle[j]) {
+                    continue outer;
+                }
+            }
+            return true;
+        }
+        return false;
+    }
 }

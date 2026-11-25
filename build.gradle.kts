@@ -3,12 +3,11 @@ plugins {
 }
 
 group = "com.burpmirage"
-version = "1.0.0"
+version = "1.1.0"
 
 java {
-    toolchain {
-        languageVersion.set(JavaLanguageVersion.of(17))
-    }
+    sourceCompatibility = JavaVersion.VERSION_17
+    targetCompatibility = JavaVersion.VERSION_17
 }
 
 repositories {

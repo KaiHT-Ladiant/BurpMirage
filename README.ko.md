@@ -19,8 +19,8 @@
 <p align="center">
   <a href="./README.md">English</a> ·
   <a href="https://github.com/KaiHT-Ladiant/BurpMirage/releases">Releases</a> ·
-  <a href="https://github.com/KaiHT-Ladiant/BurpMirage/releases/tag/v1.0.1-ko">한글 UI JAR</a> ·
-  <a href="https://github.com/KaiHT-Ladiant/BurpMirage/releases/tag/v1.0.1-en">영문 UI JAR</a>
+  <a href="https://github.com/KaiHT-Ladiant/BurpMirage/releases/tag/v1.1.0-ko">한글 UI JAR</a> ·
+  <a href="https://github.com/KaiHT-Ladiant/BurpMirage/releases/tag/v1.1.0-en">영문 UI JAR</a>
 </p>
 
 > **일반 사용자는 Python이나 Frida를 설치할 필요가 없습니다.** Releases JAR에는 `burpmirage-bridge.exe`(독립 실행형 네이티브 브릿지)가 포함되어 있습니다. JAR만 Burp에 로드하면 됩니다.
@@ -51,7 +51,9 @@ Windows 프로세스의 **raw TCP / 바이너리** 트래픽을 Burp에서 가�
 - **비 HTTP / 바이너리 프로토콜** — Hex dump 편집기 (ASCII 컬럼)
 - **실시간 인터셉트** — 전달 / 드롭, 버퍼 인플레이스 수정
 - **히스토리** — 수정 표시, 원본/수정본 보기, 컬럼 정렬
-- **리피터** — 패킷 재주입 + 다음 RECV를 응답으로 페어링 (Request ID)
+- **리피터**
+- **듀얼 캡처 모드** — 모드 A: WinHTTP/WinInet → Burp Proxy (기본 `127.0.0.1:8800`); 모드 B: Winsock Mirage 인터셉트; 기본 둘 다 ON, Inject 시 탐지 힌트
+- **PCAP** — 캡처 임포트, TCP payload 목록(평문 휴리스틱), 리피터 전송 / 히스토리 하이라이트 — 패킷 재주입 + 다음 RECV를 응답으로 페어링 (Request ID)
 - **설정** — 브릿지 포트, 후킹 토글, 파일 로깅
 
 ## 요구 사항
@@ -68,8 +70,8 @@ Windows 프로세스의 **raw TCP / 바이너리** 트래픽을 Burp에서 가�
 ## 빠른 시작
 
 1. [Releases](https://github.com/KaiHT-Ladiant/BurpMirage/releases)에서 JAR 다운로드:
-   - `burpmirage-1.0.1-ko.jar` — **한글 UI**
-   - `burpmirage-1.0.1-en.jar` — 영문 UI
+   - `burpmirage-1.1.0-ko.jar` — **한글 UI**
+   - `burpmirage-1.1.0-en.jar` — 영문 UI
 2. Burp: **Extensions → Add → Java** → JAR 선택  
    Extension class: `com.burpmirage.burp.BurpMirageExtension`
 3. **BurpMirage** 탭 — 포함된 브릿지가 `127.0.0.1:27042`에서 수신
@@ -98,6 +100,7 @@ Windows 프로세스의 **raw TCP / 바이너리** 트래픽을 Burp에서 가�
 | 트래픽 인터셉터 | 실시간 인터셉트, Hex 편집, 전달 / 드롭 |
 | 히스토리 | 패킷 로그, 수정 표시, 원본/수정본 보기 |
 | 리피터 | Hex dump 요청 편집 + 응답 캡처 |
+| PCAP | .pcap/.pcapng 임포트, 평문 가이드, 리피터 전송 / 히스토리 찾기 |
 | 설정 | 브릿지 경로, 후킹, 로깅 |
 
 ## 개발자용
@@ -110,7 +113,7 @@ Extension 또는 독립 브릿지를 빌드하려면 **JDK 17+**와, 브릿지 �
 ./gradlew jarEn jarKo
 ```
 
-산출물: `build/libs/burpmirage-1.0.0-en.jar`, `burpmirage-1.0.0-ko.jar`
+산출물: `build/libs/burpmirage-1.1.0-en.jar`, `burpmirage-1.1.0-ko.jar`
 
 Gradle이 JAR에 포함할 수 있도록 먼저 브릿지 exe를 빌드합니다:
 

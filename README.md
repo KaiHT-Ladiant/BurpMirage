@@ -19,8 +19,8 @@
 <p align="center">
   <a href="./README.ko.md">한국어</a> ·
   <a href="https://github.com/KaiHT-Ladiant/BurpMirage/releases">Releases</a> ·
-  <a href="https://github.com/KaiHT-Ladiant/BurpMirage/releases/tag/v1.0.1-ko">Korean UI JAR</a> ·
-  <a href="https://github.com/KaiHT-Ladiant/BurpMirage/releases/tag/v1.0.1-en">English UI JAR</a>
+  <a href="https://github.com/KaiHT-Ladiant/BurpMirage/releases/tag/v1.1.0-ko">Korean UI JAR</a> ·
+  <a href="https://github.com/KaiHT-Ladiant/BurpMirage/releases/tag/v1.1.0-en">English UI JAR</a>
 </p>
 
 > **End users do not install Python or Frida.** Download a release JAR — it bundles `burpmirage-bridge.exe`, a self-contained native bridge. Load the JAR in Burp and go.
@@ -51,7 +51,9 @@ BurpMirage intercepts, inspects, and modifies **raw TCP / binary** traffic from 
 - **Non-HTTP / binary protocols** — Hex dump editor with ASCII column
 - **Live intercept** — Forward / Drop with in-place buffer patching
 - **History** — Edited marker, Original vs Edited view, column sorting
-- **Repeater** — reinject packets and pair the next RECV as a response (Request ID)
+- **Repeater**
+- **Dual capture modes** — Mode A: WinHTTP/WinInet → Burp Proxy (default `127.0.0.1:8800`); Mode B: Winsock Mirage intercept; both ON by default with detect hints on Inject
+- **PCAP** — import capture, list TCP payloads (plaintext heuristic), send to Repeater / highlight in History — reinject packets and pair the next RECV as a response (Request ID)
 - **Settings** — bridge port, hook toggles, file logging
 
 ## Requirements
@@ -68,8 +70,8 @@ BurpMirage intercepts, inspects, and modifies **raw TCP / binary** traffic from 
 ## Quick start
 
 1. Download a release JAR from [Releases](https://github.com/KaiHT-Ladiant/BurpMirage/releases):
-   - `burpmirage-1.0.1-en.jar` — English UI
-   - `burpmirage-1.0.1-ko.jar` — Korean UI
+   - `burpmirage-1.1.0-en.jar` — English UI
+   - `burpmirage-1.1.0-ko.jar` — Korean UI
 2. In Burp: **Extensions → Add → Java** → select the JAR  
    Extension class: `com.burpmirage.burp.BurpMirageExtension`
 3. Open the **BurpMirage** tab — the bundled bridge listens on `127.0.0.1:27042`.
@@ -98,6 +100,7 @@ Focus the Interceptor panel (e.g. click the hex dump), then:
 | Traffic Interceptor | Live intercept, hex edit, Forward / Drop |
 | History | Packet log, Edited flag, Original/Edited view |
 | Repeater | Hex-dump request editor + response capture |
+| PCAP | Import .pcap/.pcapng, plaintext guide, send to Repeater / find in History |
 | Settings | Bridge path, hooks, logging |
 
 ## Developers
@@ -110,7 +113,7 @@ Building the extension or the standalone bridge requires **JDK 17+** and, for br
 ./gradlew jarEn jarKo
 ```
 
-Artifacts: `build/libs/burpmirage-1.0.0-en.jar` and `burpmirage-1.0.0-ko.jar`
+Artifacts: `build/libs/burpmirage-1.1.0-en.jar` and `burpmirage-1.1.0-ko.jar`
 
 Build the bridge exe first so Gradle can bundle it:
 

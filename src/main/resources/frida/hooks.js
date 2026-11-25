@@ -12,6 +12,15 @@ var hooked = {
   recv: true
 };
 
+// Injected at extract-time by FridaController (defaults if missing).
+var modeProxyForce = (typeof __BM_MODE_PROXY !== 'undefined') ? !!__BM_MODE_PROXY : true;
+var modeSocketMirage = (typeof __BM_MODE_SOCKET !== 'undefined') ? !!__BM_MODE_SOCKET : true;
+var burpProxyHost = (typeof __BM_PROXY_HOST !== 'undefined') ? ('' + __BM_PROXY_HOST) : '127.0.0.1';
+var burpProxyPort = (typeof __BM_PROXY_PORT !== 'undefined') ? (__BM_PROXY_PORT | 0) : 8800;
+var proxyForceInstalled = false;
+var proxyFnsHooked = {};
+var socketHooksInstalled = false;
+
 var packetSeq = 0;
 var lastSocketFd = -1;
 var ws2 = null;
@@ -183,7 +192,21 @@ rpc.exports = {
   configure: function (cfg) {
     if (cfg.hookSend !== undefined) hooked.send = !!cfg.hookSend;
     if (cfg.hookRecv !== undefined) hooked.recv = !!cfg.hookRecv;
-    return true;
+    if (cfg.modeProxyForce !== undefined) modeProxyForce = !!cfg.modeProxyForce;
+    if (cfg.modeSocketMirage !== undefined) modeSocketMirage = !!cfg.modeSocketMirage;
+    if (cfg.burpProxyHost) burpProxyHost = '' + cfg.burpProxyHost;
+    if (cfg.burpProxyPort !== undefined) burpProxyPort = cfg.burpProxyPort | 0;
+    if (modeProxyForce && !proxyForceInstalled) {
+      installProxyForce();
+    }
+    if (modeSocketMirage && !socketHooksInstalled) {
+      installSocketHooks();
+    }
+    return {
+      modeProxyForce: modeProxyForce,
+      modeSocketMirage: modeSocketMirage,
+      burpProxy: burpProxyHost + ':' + burpProxyPort
+    };
   },
   inject: function (bytes, peerHint, waitResponse, requestId) {
     if (!bytes || !bytes.length) {
@@ -348,10 +371,146 @@ function hookWSARecv() {
   console.log('[BurpMirage] hooked WSARecv (sync)');
 }
 
-function install() {
+function moduleLoaded(name) {
+  return Process.findModuleByName(name) !== null
+      || Process.findModuleByName(name.toUpperCase()) !== null
+      || Process.findModuleByName(name.toLowerCase()) !== null;
+}
+
+function detectAndAnnounce() {
+  var winhttp = moduleLoaded('winhttp.dll');
+  var wininet = moduleLoaded('wininet.dll');
+  var ws2 = moduleLoaded('ws2_32.dll');
+  var hint;
+  if ((winhttp || wininet) && ws2) {
+    hint = 'HTTP stack + Winsock detected — recommend Mode A+B (both ON)';
+  } else if (winhttp || wininet) {
+    hint = 'WinHTTP/WinInet detected — recommend Mode A (Burp Proxy Force)';
+  } else if (ws2) {
+    hint = 'Winsock only — recommend Mode B (Mirage Socket Intercept)';
+  } else {
+    hint = 'No WinHTTP/WinInet/ws2_32 yet — hooks will attach when modules load';
+  }
+  send({
+    type: 'event',
+    message: 'detect: winhttp=' + winhttp + ' wininet=' + wininet
+        + ' ws2=' + ws2 + ' | ' + hint
+  });
+}
+
+function proxyString() {
+  return burpProxyHost + ':' + burpProxyPort;
+}
+
+function installProxyForce() {
+  if (proxyForceInstalled) {
+    return;
+  }
+  var proxy = proxyString();
+  var hookedAny = false;
+
+  function hookWinHttpOpen(name) {
+    if (proxyFnsHooked[name]) return;
+    var mod = Process.findModuleByName('winhttp.dll');
+    if (!mod) return;
+    var addr = null;
+    if (typeof mod.findExportByName === 'function') {
+      addr = mod.findExportByName(name);
+    }
+    if (addr === null && typeof Module.findExportByName === 'function') {
+      addr = Module.findExportByName('winhttp.dll', name);
+    }
+    if (addr === null) return;
+    // WinHttpOpen(LPCWSTR agent, DWORD accessType, LPCWSTR proxy, LPCWSTR bypass, DWORD flags)
+    var WINHTTP_ACCESS_TYPE_NAMED_PROXY = 3;
+    var proxyBuf = Memory.allocUtf16String(proxy);
+    var bypassBuf = Memory.allocUtf16String('<local>');
+    Interceptor.attach(addr, {
+      onEnter: function (args) {
+        args[1] = ptr(WINHTTP_ACCESS_TYPE_NAMED_PROXY);
+        args[2] = proxyBuf;
+        args[3] = bypassBuf;
+      }
+    });
+    proxyFnsHooked[name] = true;
+    console.log('[BurpMirage] Proxy Force hooked ' + name + ' -> ' + proxy);
+    hookedAny = true;
+  }
+
+  function hookInternetOpen(name, unicode) {
+    if (proxyFnsHooked[name]) return;
+    var mod = Process.findModuleByName('wininet.dll');
+    if (!mod) return;
+    var addr = null;
+    if (typeof mod.findExportByName === 'function') {
+      addr = mod.findExportByName(name);
+    }
+    if (addr === null && typeof Module.findExportByName === 'function') {
+      addr = Module.findExportByName('wininet.dll', name);
+    }
+    if (addr === null) return;
+    // InternetOpen(agent, accessType, proxy, bypass, flags) — accessType PROXY = 3
+    var INTERNET_OPEN_TYPE_PROXY = 3;
+    var proxyBuf = unicode ? Memory.allocUtf16String(proxy) : Memory.allocUtf8String(proxy);
+    var bypassBuf = unicode ? Memory.allocUtf16String('<local>') : Memory.allocUtf8String('<local>');
+    Interceptor.attach(addr, {
+      onEnter: function (args) {
+        args[1] = ptr(INTERNET_OPEN_TYPE_PROXY);
+        args[2] = proxyBuf;
+        args[3] = bypassBuf;
+      }
+    });
+    console.log('[BurpMirage] Proxy Force hooked ' + name + ' -> ' + proxy);
+    hookedAny = true;
+  }
+
+  hookWinHttpOpen('WinHttpOpen');
+  hookInternetOpen('InternetOpenW', true);
+  hookInternetOpen('InternetOpenA', false);
+
+  // Late-load: when winhttp/wininet appear, install again.
+  var loaders = ['LoadLibraryW', 'LoadLibraryExW', 'LoadLibraryA', 'LoadLibraryExA'];
+  loaders.forEach(function (ln) {
+    var k32 = Process.findModuleByName('kernel32.dll');
+    if (!k32) return;
+    var p = k32.findExportByName ? k32.findExportByName(ln) : null;
+    if (p === null && typeof Module.findExportByName === 'function') {
+      p = Module.findExportByName('kernel32.dll', ln);
+    }
+    if (p === null) return;
+    Interceptor.attach(p, {
+      onLeave: function (retval) {
+        if (retval.isNull()) return;
+        if (!proxyForceInstalled) return;
+        // Re-attempt hooks if DLLs just appeared
+        try {
+          hookWinHttpOpen('WinHttpOpen');
+          hookInternetOpen('InternetOpenW', true);
+          hookInternetOpen('InternetOpenA', false);
+        } catch (e) {}
+      }
+    });
+  });
+
+  proxyForceInstalled = true;
+  send({
+    type: 'event',
+    message: 'Mode A Proxy Force ' + (hookedAny ? 'active' : 'armed (waiting for WinHTTP/WinInet)')
+        + ' -> ' + proxy + ' (Burp Proxy). Install Burp CA for HTTPS.'
+  });
+}
+
+function installSocketHooks() {
+  if (socketHooksInstalled) {
+    return;
+  }
   if (getWs2() === null) {
-    send({ type: 'event', message: 'ws2_32.dll not loaded yet in pid ' + Process.id });
-    setTimeout(install, 1000);
+    send({ type: 'event', message: 'ws2_32.dll not loaded yet in pid ' + Process.id + ' (Mode B pending)' });
+    setTimeout(function () {
+      if (modeSocketMirage && !socketHooksInstalled) {
+        installSocketHooks();
+      }
+    }, 1000);
     return;
   }
 
@@ -377,7 +536,6 @@ function install() {
         this.lpBuffers = lpBuffers;
         if (!this.drop && decision && decision.data) {
           var applied = applyInPlace(buf, len, decision);
-          // Reflect logical length in WSABUF.len (same as send/sendto args[2]).
           if (applied && !applied.drop) {
             lpBuffers.writeU32(applied.length);
           }
@@ -393,8 +551,27 @@ function install() {
   }
 
   hookWSARecv();
+  socketHooksInstalled = true;
+  send({ type: 'event', message: 'Mode B Winsock hooks installed in pid ' + Process.id });
+}
 
-  send({ type: 'event', message: 'Winsock hooks installed in pid ' + Process.id });
+function install() {
+  detectAndAnnounce();
+  send({
+    type: 'event',
+    message: 'modes: proxyForce=' + modeProxyForce
+        + ' socketMirage=' + modeSocketMirage
+        + ' burpProxy=' + proxyString()
+  });
+  if (modeProxyForce) {
+    installProxyForce();
+  }
+  if (modeSocketMirage) {
+    installSocketHooks();
+  }
+  if (!modeProxyForce && !modeSocketMirage) {
+    send({ type: 'event', message: 'WARNING: both Mode A and Mode B are OFF — nothing hooked' });
+  }
 }
 
 setImmediate(install);

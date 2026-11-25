@@ -12,7 +12,7 @@ import javax.swing.JTabbedPane;
 import java.awt.BorderLayout;
 
 /**
- * Root suite-tab UI hosting Process / Intercept / History / Repeater / Settings.
+ * Root suite-tab UI hosting Process / Intercept / History / PCAP / Repeater / Settings.
  */
 public final class MainPanel extends JPanel {
     private final JTabbedPane tabs = new JTabbedPane();
@@ -38,19 +38,31 @@ public final class MainPanel extends JPanel {
                 settings,
                 packet -> {
                     repeaterPanel.load(packet);
-                    tabs.setSelectedIndex(3);
+                    tabs.setSelectedComponent(repeaterPanel);
                 }
         );
 
         HistoryPanel history = new HistoryPanel(controller.history(), packet -> {
             repeaterPanel.load(packet);
-            tabs.setSelectedIndex(3);
+            tabs.setSelectedComponent(repeaterPanel);
         });
+
+        PcapPanel pcap = new PcapPanel(
+                packet -> {
+                    repeaterPanel.load(packet);
+                    tabs.setSelectedComponent(repeaterPanel);
+                },
+                history::highlightContaining,
+                () -> tabs.setSelectedComponent(repeaterPanel),
+                () -> tabs.setSelectedComponent(history)
+        );
+
         SettingsPanel settingsPanel = new SettingsPanel(settings, bridge, logger);
 
         tabs.addTab(I18n.get("tab.process"), processes);
         tabs.addTab(I18n.get("tab.intercept"), interceptor);
         tabs.addTab(I18n.get("tab.history"), history);
+        tabs.addTab(I18n.get("tab.pcap"), pcap);
         tabs.addTab(I18n.get("tab.repeater"), repeaterPanel);
         tabs.addTab(I18n.get("tab.settings"), settingsPanel);
 

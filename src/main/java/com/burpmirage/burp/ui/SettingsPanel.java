@@ -41,6 +41,10 @@ public final class SettingsPanel extends JPanel {
     private final JCheckBox hookSend = new JCheckBox(I18n.get("settings.hook_send"));
     private final JCheckBox hookRecv = new JCheckBox(I18n.get("settings.hook_recv"));
     private final JCheckBox autoEmpty = new JCheckBox(I18n.get("settings.auto_empty"));
+    private final JCheckBox modeProxyForce = new JCheckBox(I18n.get("settings.mode_proxy"), true);
+    private final JCheckBox modeSocketMirage = new JCheckBox(I18n.get("settings.mode_socket"), true);
+    private final JTextField burpProxyHost = new JTextField(16);
+    private final JSpinner burpProxyPort;
     private final JSpinner historySpinner;
     private final JLabel bridgeStatus = new JLabel(" ");
 
@@ -53,6 +57,7 @@ public final class SettingsPanel extends JPanel {
 
         portSpinner = new JSpinner(new SpinnerNumberModel(settings.bridgePort(), 1024, 65535, 1));
         historySpinner = new JSpinner(new SpinnerNumberModel(settings.maxHistory(), 100, 100000, 100));
+        burpProxyPort = new JSpinner(new SpinnerNumberModel(settings.burpProxyPort(), 1, 65535, 1));
 
         JPanel form = new JPanel(new GridBagLayout());
         form.setBorder(new TitledBorder(I18n.get("settings.conn")));
@@ -86,6 +91,30 @@ public final class SettingsPanel extends JPanel {
         hookSend.setSelected(settings.hookSend());
         hookRecv.setSelected(settings.hookRecv());
         autoEmpty.setSelected(settings.autoForwardEmpty());
+        modeProxyForce.setSelected(settings.modeProxyForce());
+        modeSocketMirage.setSelected(settings.modeSocketMirage());
+        burpProxyHost.setText(settings.burpProxyHost());
+        burpProxyPort.setValue(settings.burpProxyPort());
+
+        JPanel modes = new JPanel(new GridBagLayout());
+        modes.setBorder(new TitledBorder(I18n.get("settings.modes")));
+        GridBagConstraints m = new GridBagConstraints();
+        m.insets = new Insets(4, 4, 4, 4);
+        m.anchor = GridBagConstraints.WEST;
+        m.gridx = 0; m.gridy = 0; m.gridwidth = 2;
+        modes.add(modeProxyForce, m);
+        m.gridy = 1;
+        modes.add(modeSocketMirage, m);
+        m.gridy = 2; m.gridwidth = 1;
+        modes.add(new JLabel(I18n.get("settings.burp_proxy_host")), m);
+        m.gridx = 1; m.fill = GridBagConstraints.HORIZONTAL; m.weightx = 1;
+        modes.add(burpProxyHost, m);
+        m.gridx = 0; m.gridy = 3; m.weightx = 0; m.fill = GridBagConstraints.NONE;
+        modes.add(new JLabel(I18n.get("settings.burp_proxy_port")), m);
+        m.gridx = 1; m.fill = GridBagConstraints.HORIZONTAL; m.weightx = 1;
+        modes.add(burpProxyPort, m);
+        m.gridx = 0; m.gridy = 4; m.gridwidth = 2;
+        modes.add(new JLabel(I18n.get("settings.modes_hint")), m);
 
         JPanel hooks = new JPanel(new GridBagLayout());
         hooks.setBorder(new TitledBorder(I18n.get("settings.hooks")));
@@ -164,8 +193,11 @@ public final class SettingsPanel extends JPanel {
         actions.add(bridgeStatus);
 
         JPanel center = new JPanel(new BorderLayout(8, 8));
+        JPanel mid = new JPanel(new BorderLayout(8, 8));
+        mid.add(modes, BorderLayout.NORTH);
+        mid.add(hooks, BorderLayout.CENTER);
         center.add(form, BorderLayout.NORTH);
-        center.add(hooks, BorderLayout.CENTER);
+        center.add(mid, BorderLayout.CENTER);
         center.add(logPanel, BorderLayout.SOUTH);
 
         add(center, BorderLayout.CENTER);
@@ -211,6 +243,10 @@ public final class SettingsPanel extends JPanel {
         settings.setHookSend(hookSend.isSelected());
         settings.setHookRecv(hookRecv.isSelected());
         settings.setAutoForwardEmpty(autoEmpty.isSelected());
+        settings.setModeProxyForce(modeProxyForce.isSelected());
+        settings.setModeSocketMirage(modeSocketMirage.isSelected());
+        settings.setBurpProxyHost(burpProxyHost.getText());
+        settings.setBurpProxyPort((Integer) burpProxyPort.getValue());
         settings.setSearchPattern(searchField.getText());
         settings.setReplacePattern(replaceField.getText());
         String lp = logPath.getText();

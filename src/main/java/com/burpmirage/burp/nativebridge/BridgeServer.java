@@ -141,6 +141,10 @@ public final class BridgeServer implements AutoCloseable {
         msg.addProperty("intercept", settings.interceptEnabled());
         msg.addProperty("hookSend", settings.hookSend());
         msg.addProperty("hookRecv", settings.hookRecv());
+        msg.addProperty("modeProxyForce", settings.modeProxyForce());
+        msg.addProperty("modeSocketMirage", settings.modeSocketMirage());
+        msg.addProperty("burpProxyHost", settings.burpProxyHost());
+        msg.addProperty("burpProxyPort", settings.burpProxyPort());
         writeLine(w, gson.toJson(msg));
     }
 

@@ -363,6 +363,10 @@ def main() -> int:
                 {
                     "hookSend": bool(cfg.get("hookSend", True)),
                     "hookRecv": bool(cfg.get("hookRecv", True)),
+                    "modeProxyForce": bool(cfg.get("modeProxyForce", True)),
+                    "modeSocketMirage": bool(cfg.get("modeSocketMirage", True)),
+                    "burpProxyHost": cfg.get("burpProxyHost") or "127.0.0.1",
+                    "burpProxyPort": int(cfg.get("burpProxyPort") or 8800),
                 }
             )
         except Exception as e:
