@@ -6,18 +6,22 @@ import com.burpmirage.burp.util.I18n;
 import com.burpmirage.burp.util.PacketLogger;
 import com.burpmirage.burp.util.PythonDetector;
 
+import javax.swing.Box;
+import javax.swing.BoxLayout;
 import javax.swing.JButton;
 import javax.swing.JCheckBox;
 import javax.swing.JFileChooser;
 import javax.swing.JLabel;
 import javax.swing.JOptionPane;
 import javax.swing.JPanel;
+import javax.swing.JScrollPane;
 import javax.swing.JSpinner;
 import javax.swing.JTextField;
 import javax.swing.SpinnerNumberModel;
 import javax.swing.border.EmptyBorder;
 import javax.swing.border.TitledBorder;
 import java.awt.BorderLayout;
+import java.awt.Dimension;
 import java.awt.GridBagConstraints;
 import java.awt.GridBagLayout;
 import java.awt.Insets;
@@ -43,6 +47,7 @@ public final class SettingsPanel extends JPanel {
     private final JCheckBox autoEmpty = new JCheckBox(I18n.get("settings.auto_empty"));
     private final JCheckBox modeProxyForce = new JCheckBox(I18n.get("settings.mode_proxy"), true);
     private final JCheckBox modeSocketMirage = new JCheckBox(I18n.get("settings.mode_socket"), true);
+    private final JCheckBox modeTlsUnpin = new JCheckBox(I18n.get("settings.mode_tls_unpin"), true);
     private final JTextField burpProxyHost = new JTextField(16);
     private final JSpinner burpProxyPort;
     private final JSpinner historySpinner;
@@ -93,6 +98,7 @@ public final class SettingsPanel extends JPanel {
         autoEmpty.setSelected(settings.autoForwardEmpty());
         modeProxyForce.setSelected(settings.modeProxyForce());
         modeSocketMirage.setSelected(settings.modeSocketMirage());
+        modeTlsUnpin.setSelected(settings.modeTlsUnpin());
         burpProxyHost.setText(settings.burpProxyHost());
         burpProxyPort.setValue(settings.burpProxyPort());
 
@@ -105,15 +111,17 @@ public final class SettingsPanel extends JPanel {
         modes.add(modeProxyForce, m);
         m.gridy = 1;
         modes.add(modeSocketMirage, m);
-        m.gridy = 2; m.gridwidth = 1;
+        m.gridy = 2;
+        modes.add(modeTlsUnpin, m);
+        m.gridy = 3; m.gridwidth = 1;
         modes.add(new JLabel(I18n.get("settings.burp_proxy_host")), m);
         m.gridx = 1; m.fill = GridBagConstraints.HORIZONTAL; m.weightx = 1;
         modes.add(burpProxyHost, m);
-        m.gridx = 0; m.gridy = 3; m.weightx = 0; m.fill = GridBagConstraints.NONE;
+        m.gridx = 0; m.gridy = 4; m.weightx = 0; m.fill = GridBagConstraints.NONE;
         modes.add(new JLabel(I18n.get("settings.burp_proxy_port")), m);
         m.gridx = 1; m.fill = GridBagConstraints.HORIZONTAL; m.weightx = 1;
         modes.add(burpProxyPort, m);
-        m.gridx = 0; m.gridy = 4; m.gridwidth = 2;
+        m.gridx = 0; m.gridy = 5; m.gridwidth = 2;
         modes.add(new JLabel(I18n.get("settings.modes_hint")), m);
 
         JPanel hooks = new JPanel(new GridBagLayout());
@@ -192,19 +200,40 @@ public final class SettingsPanel extends JPanel {
         actions.add(stopBridge);
         actions.add(bridgeStatus);
 
-        JPanel center = new JPanel(new BorderLayout(8, 8));
-        JPanel mid = new JPanel(new BorderLayout(8, 8));
-        mid.add(modes, BorderLayout.NORTH);
-        mid.add(hooks, BorderLayout.CENTER);
-        center.add(form, BorderLayout.NORTH);
-        center.add(mid, BorderLayout.CENTER);
-        center.add(logPanel, BorderLayout.SOUTH);
+        // Vertical stack — nested BorderLayout caused modes/hooks/log to overlap.
+        JPanel stack = new JPanel();
+        stack.setLayout(new BoxLayout(stack, BoxLayout.Y_AXIS));
+        stack.add(section(form));
+        stack.add(Box.createVerticalStrut(8));
+        stack.add(section(modes));
+        stack.add(Box.createVerticalStrut(8));
+        stack.add(section(hooks));
+        stack.add(Box.createVerticalStrut(8));
+        stack.add(section(logPanel));
+        stack.add(Box.createVerticalGlue());
 
-        add(center, BorderLayout.CENTER);
+        JScrollPane scroll = new JScrollPane(stack);
+        scroll.setBorder(null);
+        scroll.getVerticalScrollBar().setUnitIncrement(16);
+        add(scroll, BorderLayout.CENTER);
         add(actions, BorderLayout.SOUTH);
 
         bridge.setStatusListener(msg ->
                 javax.swing.SwingUtilities.invokeLater(() -> bridgeStatus.setText(msg)));
+    }
+
+    /** Full width, natural height — stops BoxLayout from stretching sections over each other. */
+    private static JPanel section(JPanel inner) {
+        JPanel wrap = new JPanel(new BorderLayout()) {
+            @Override
+            public Dimension getMaximumSize() {
+                Dimension pref = getPreferredSize();
+                return new Dimension(Integer.MAX_VALUE, pref.height);
+            }
+        };
+        wrap.add(inner, BorderLayout.CENTER);
+        wrap.setAlignmentX(LEFT_ALIGNMENT);
+        return wrap;
     }
 
     private int addRow(JPanel form, GridBagConstraints c, int row, String label, java.awt.Component field) {
@@ -245,6 +274,7 @@ public final class SettingsPanel extends JPanel {
         settings.setAutoForwardEmpty(autoEmpty.isSelected());
         settings.setModeProxyForce(modeProxyForce.isSelected());
         settings.setModeSocketMirage(modeSocketMirage.isSelected());
+        settings.setModeTlsUnpin(modeTlsUnpin.isSelected());
         settings.setBurpProxyHost(burpProxyHost.getText());
         settings.setBurpProxyPort((Integer) burpProxyPort.getValue());
         settings.setSearchPattern(searchField.getText());

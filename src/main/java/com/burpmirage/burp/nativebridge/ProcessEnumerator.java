@@ -37,7 +37,8 @@ public final class ProcessEnumerator {
                     "-NoProfile",
                     "-Command",
                     "Get-CimInstance Win32_Process | " +
-                            "Select-Object ProcessId,Name,ExecutablePath, @{N='User';E={try{$_.GetOwner().User}catch{''}}} | " +
+                            "Select-Object ProcessId,Name,ExecutablePath,CommandLine," +
+                            " @{N='User';E={try{$_.GetOwner().User}catch{''}}} | " +
                             "ConvertTo-Csv -NoTypeInformation"
             );
             pb.redirectErrorStream(true);
@@ -57,9 +58,10 @@ public final class ProcessEnumerator {
                     int pid = parseInt(unquote(cols[0]));
                     String name = unquote(cols[1]);
                     String path = unquote(cols[2]);
-                    String user = cols.length > 3 ? unquote(cols[3]) : "";
+                    String commandLine = cols.length > 3 ? unquote(cols[3]) : "";
+                    String user = cols.length > 4 ? unquote(cols[4]) : "";
                     if (pid > 0 && !name.isBlank()) {
-                        result.add(new ProcessInfo(pid, name, path, user));
+                        result.add(new ProcessInfo(pid, name, path, user, commandLine));
                     }
                 }
             }
@@ -68,6 +70,7 @@ public final class ProcessEnumerator {
             return List.of();
         }
         result.sort(Comparator.comparing(ProcessInfo::name, String.CASE_INSENSITIVE_ORDER)
+                .thenComparing(ProcessInfo::role, String.CASE_INSENSITIVE_ORDER)
                 .thenComparingInt(ProcessInfo::pid));
         return result;
     }
@@ -90,7 +93,7 @@ public final class ProcessEnumerator {
                     int pid = parseInt(unquote(cols[1]));
                     String user = cols.length > 6 ? unquote(cols[6]) : "";
                     if (pid > 0) {
-                        map.put(pid, new ProcessInfo(pid, name, "", user));
+                        map.put(pid, new ProcessInfo(pid, name, "", user, ""));
                     }
                 }
             }
@@ -112,7 +115,9 @@ public final class ProcessEnumerator {
         for (ProcessInfo p : all) {
             if (p.name().toLowerCase(Locale.ROOT).contains(q)
                     || Integer.toString(p.pid()).contains(q)
-                    || p.displayPath().toLowerCase(Locale.ROOT).contains(q)) {
+                    || p.displayPath().toLowerCase(Locale.ROOT).contains(q)
+                    || p.role().toLowerCase(Locale.ROOT).contains(q)
+                    || p.displayCommandLine().toLowerCase(Locale.ROOT).contains(q)) {
                 filtered.add(p);
             }
         }

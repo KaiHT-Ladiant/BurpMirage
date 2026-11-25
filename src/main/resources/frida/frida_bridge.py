@@ -365,6 +365,7 @@ def main() -> int:
                     "hookRecv": bool(cfg.get("hookRecv", True)),
                     "modeProxyForce": bool(cfg.get("modeProxyForce", True)),
                     "modeSocketMirage": bool(cfg.get("modeSocketMirage", True)),
+                    "modeTlsUnpin": bool(cfg.get("modeTlsUnpin", True)),
                     "burpProxyHost": cfg.get("burpProxyHost") or "127.0.0.1",
                     "burpProxyPort": int(cfg.get("burpProxyPort") or 8800),
                 }

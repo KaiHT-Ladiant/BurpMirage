@@ -45,7 +45,14 @@ public final class ProcessSelectorPanel extends JPanel {
         this.onAttached = onAttached != null ? onAttached : p -> {};
         setBorder(new EmptyBorder(8, 8, 8, 8));
 
-        model = new DefaultTableModel(new Object[]{"PID", "Name", "User", "Path"}, 0) {
+        model = new DefaultTableModel(
+                new Object[]{
+                        I18n.get("process.col.pid"),
+                        I18n.get("process.col.name"),
+                        I18n.get("process.col.role"),
+                        I18n.get("process.col.user"),
+                        I18n.get("process.col.path")
+                }, 0) {
             @Override
             public boolean isCellEditable(int row, int column) {
                 return false;
@@ -62,9 +69,29 @@ public final class ProcessSelectorPanel extends JPanel {
         sorter = new TableRowSorter<>(model);
         table.setRowSorter(sorter);
         table.getColumnModel().getColumn(0).setPreferredWidth(70);
-        table.getColumnModel().getColumn(1).setPreferredWidth(140);
-        table.getColumnModel().getColumn(2).setPreferredWidth(100);
-        table.getColumnModel().getColumn(3).setPreferredWidth(420);
+        table.getColumnModel().getColumn(1).setPreferredWidth(130);
+        table.getColumnModel().getColumn(2).setPreferredWidth(140);
+        table.getColumnModel().getColumn(3).setPreferredWidth(90);
+        table.getColumnModel().getColumn(4).setPreferredWidth(380);
+        table.addMouseMotionListener(new java.awt.event.MouseMotionAdapter() {
+            @Override
+            public void mouseMoved(java.awt.event.MouseEvent e) {
+                int viewRow = table.rowAtPoint(e.getPoint());
+                if (viewRow < 0) {
+                    table.setToolTipText(I18n.get("process.role_hint"));
+                    return;
+                }
+                int modelRow = table.convertRowIndexToModel(viewRow);
+                int pid = (Integer) model.getValueAt(modelRow, 0);
+                ProcessInfo info = cache.stream().filter(p -> p.pid() == pid).findFirst().orElse(null);
+                if (info == null || info.displayCommandLine().isBlank()) {
+                    table.setToolTipText(I18n.get("process.role_hint"));
+                    return;
+                }
+                String tip = info.roleDisplay() + "  |  " + info.displayCommandLine();
+                table.setToolTipText(tip.length() > 500 ? tip.substring(0, 500) + "…" : tip);
+            }
+        });
 
         JPanel north = new JPanel(new BorderLayout(8, 0));
         JPanel filters = new JPanel(new FlowLayout(FlowLayout.LEFT));
@@ -100,10 +127,15 @@ public final class ProcessSelectorPanel extends JPanel {
 
         filterField.getDocument().addDocumentListener(new SimpleDocumentListener(this::applyFilter));
 
+        JPanel south = new JPanel(new BorderLayout(4, 2));
+        JLabel hint = new JLabel(I18n.get("process.role_hint"));
+        south.add(hint, BorderLayout.NORTH);
+        statusLabel.setPreferredSize(new Dimension(100, 20));
+        south.add(statusLabel, BorderLayout.SOUTH);
+
         add(north, BorderLayout.NORTH);
         add(new JScrollPane(table), BorderLayout.CENTER);
-        statusLabel.setPreferredSize(new Dimension(100, 20));
-        add(statusLabel, BorderLayout.SOUTH);
+        add(south, BorderLayout.SOUTH);
 
         fridaController.setStatusListener(msg ->
                 javax.swing.SwingUtilities.invokeLater(() -> statusLabel.setText(msg)));
@@ -125,7 +157,13 @@ public final class ProcessSelectorPanel extends JPanel {
                     cache = get();
                     model.setRowCount(0);
                     for (ProcessInfo p : cache) {
-                        model.addRow(new Object[]{p.pid(), p.name(), p.user(), p.displayPath()});
+                        model.addRow(new Object[]{
+                                p.pid(),
+                                p.name(),
+                                p.roleDisplay(),
+                                p.user(),
+                                p.displayPath()
+                        });
                     }
                     statusLabel.setText(I18n.format("process.count", cache.size()));
                     applyFilter();
@@ -141,7 +179,28 @@ public final class ProcessSelectorPanel extends JPanel {
         if (q == null || q.isBlank()) {
             sorter.setRowFilter(null);
         } else {
-            sorter.setRowFilter(RowFilter.regexFilter("(?i)" + java.util.regex.Pattern.quote(q)));
+            String needle = q.toLowerCase(java.util.Locale.ROOT);
+            sorter.setRowFilter(new RowFilter<>() {
+                @Override
+                public boolean include(Entry<? extends DefaultTableModel, ? extends Integer> entry) {
+                    int modelRow = entry.getIdentifier();
+                    int pid = (Integer) model.getValueAt(modelRow, 0);
+                    ProcessInfo info = cache.stream().filter(p -> p.pid() == pid).findFirst().orElse(null);
+                    if (info != null) {
+                        String hay = (info.name() + ' ' + info.role() + ' ' + info.user()
+                                + ' ' + info.displayPath() + ' ' + info.displayCommandLine()
+                                + ' ' + info.pid()).toLowerCase(java.util.Locale.ROOT);
+                        return hay.contains(needle);
+                    }
+                    for (int i = 0; i < entry.getValueCount(); i++) {
+                        Object v = entry.getValue(i);
+                        if (v != null && String.valueOf(v).toLowerCase(java.util.Locale.ROOT).contains(needle)) {
+                            return true;
+                        }
+                    }
+                    return false;
+                }
+            });
         }
     }
 
@@ -156,8 +215,9 @@ public final class ProcessSelectorPanel extends JPanel {
         ProcessInfo info = cache.stream().filter(p -> p.pid() == pid).findFirst().orElse(null);
         if (info == null) {
             info = new ProcessInfo(pid, String.valueOf(model.getValueAt(modelRow, 1)),
+                    String.valueOf(model.getValueAt(modelRow, 4)),
                     String.valueOf(model.getValueAt(modelRow, 3)),
-                    String.valueOf(model.getValueAt(modelRow, 2)));
+                    "");
         }
 
         ProcessInfo target = info;
@@ -174,7 +234,12 @@ public final class ProcessSelectorPanel extends JPanel {
                 try {
                     get();
                     onAttached.accept(target);
-                    statusLabel.setText(I18n.format("process.hooked", target.name(), target.pid()));
+                    String role = target.role();
+                    if (!role.isBlank()) {
+                        statusLabel.setText(I18n.format("process.hooked_role", target.name(), target.pid(), role));
+                    } else {
+                        statusLabel.setText(I18n.format("process.hooked", target.name(), target.pid()));
+                    }
                 } catch (Exception e) {
                     statusLabel.setText(I18n.get("process.inject_failed"));
                     JOptionPane.showMessageDialog(

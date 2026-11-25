@@ -25,6 +25,8 @@ public final class ExtensionSettings {
     private boolean modeProxyForce = true;
     /** Mode B: Winsock send/recv intercept (Mirage). */
     private boolean modeSocketMirage = true;
+    /** Mode C: TLS cert unpin (Chromium/BoringSSL + Schannel) for Burp MITM. */
+    private boolean modeTlsUnpin = true;
     private String burpProxyHost = "127.0.0.1";
     private int burpProxyPort = 8800;
 
@@ -141,6 +143,14 @@ public final class ExtensionSettings {
         this.modeSocketMirage = modeSocketMirage;
     }
 
+    public boolean modeTlsUnpin() {
+        return modeTlsUnpin;
+    }
+
+    public void setModeTlsUnpin(boolean modeTlsUnpin) {
+        this.modeTlsUnpin = modeTlsUnpin;
+    }
+
     public String burpProxyHost() {
         return burpProxyHost;
     }
@@ -171,6 +181,7 @@ public final class ExtensionSettings {
         bridgeExePath = p.get("bridgeExePath", "");
         modeProxyForce = p.getBoolean("modeProxyForce", true);
         modeSocketMirage = p.getBoolean("modeSocketMirage", true);
+        modeTlsUnpin = p.getBoolean("modeTlsUnpin", true);
         burpProxyHost = p.get("burpProxyHost", "127.0.0.1");
         burpProxyPort = p.getInt("burpProxyPort", 8800);
         String log = p.get("logFile", "");
@@ -208,6 +219,7 @@ public final class ExtensionSettings {
         p.put("bridgeExePath", bridgeExePath);
         p.putBoolean("modeProxyForce", modeProxyForce);
         p.putBoolean("modeSocketMirage", modeSocketMirage);
+        p.putBoolean("modeTlsUnpin", modeTlsUnpin);
         p.put("burpProxyHost", burpProxyHost);
         p.putInt("burpProxyPort", burpProxyPort);
         p.put("logFile", logFile == null ? "" : logFile.toString());

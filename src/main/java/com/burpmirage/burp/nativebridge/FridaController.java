@@ -273,11 +273,13 @@ public final class FridaController implements AutoCloseable {
         String preamble = ""
                 + "var __BM_MODE_PROXY = " + settings.modeProxyForce() + ";\n"
                 + "var __BM_MODE_SOCKET = " + settings.modeSocketMirage() + ";\n"
+                + "var __BM_MODE_TLS_UNPIN = " + settings.modeTlsUnpin() + ";\n"
                 + "var __BM_PROXY_HOST = '" + host + "';\n"
                 + "var __BM_PROXY_PORT = " + settings.burpProxyPort() + ";\n";
         Files.writeString(target, preamble + base, StandardCharsets.UTF_8);
         status("hooks.js modes: proxy=" + settings.modeProxyForce()
                 + " socket=" + settings.modeSocketMirage()
+                + " tlsUnpin=" + settings.modeTlsUnpin()
                 + " burp=" + settings.burpProxyHost() + ":" + settings.burpProxyPort());
     }
 
