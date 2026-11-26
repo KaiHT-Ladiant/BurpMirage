@@ -15,17 +15,23 @@ import javax.swing.JTable;
 import javax.swing.JTextField;
 import javax.swing.ListSelectionModel;
 import javax.swing.RowFilter;
+import javax.swing.SwingUtilities;
 import javax.swing.SwingWorker;
 import javax.swing.border.EmptyBorder;
 import javax.swing.table.DefaultTableModel;
+import javax.swing.table.TableColumn;
 import javax.swing.table.TableRowSorter;
 import java.awt.BorderLayout;
 import java.awt.Dimension;
 import java.awt.FlowLayout;
+import java.awt.event.MouseAdapter;
+import java.awt.event.MouseEvent;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.function.Consumer;
 
 /**
@@ -51,6 +57,7 @@ public final class ProcessSelectorPanel extends JPanel {
 
         model = new DefaultTableModel(
                 new Object[]{
+                        I18n.get("process.col.check"),
                         I18n.get("process.col.pid"),
                         I18n.get("process.col.name"),
                         I18n.get("process.col.role"),
@@ -59,25 +66,66 @@ public final class ProcessSelectorPanel extends JPanel {
                 }, 0) {
             @Override
             public boolean isCellEditable(int row, int column) {
-                return false;
+                return column == 0; // checkbox only — reliable multi-select inside Burp
             }
 
             @Override
             public Class<?> getColumnClass(int columnIndex) {
-                return columnIndex == 0 ? Integer.class : String.class;
+                if (columnIndex == 0) {
+                    return Boolean.class;
+                }
+                if (columnIndex == 1) {
+                    return Integer.class;
+                }
+                return String.class;
             }
         };
         table = new JTable(model);
-        // Ctrl/Shift multi-select — Inject Group also expands Chromium siblings from a seed.
+        // Burp often eats Ctrl+click; keep Swing multi-select + checkbox column.
         table.setSelectionMode(ListSelectionModel.MULTIPLE_INTERVAL_SELECTION);
-        table.setAutoCreateRowSorter(true);
+        table.setRowSelectionAllowed(true);
+        table.setColumnSelectionAllowed(false);
+        table.setCellSelectionEnabled(false);
         sorter = new TableRowSorter<>(model);
         table.setRowSorter(sorter);
-        table.getColumnModel().getColumn(0).setPreferredWidth(70);
-        table.getColumnModel().getColumn(1).setPreferredWidth(130);
-        table.getColumnModel().getColumn(2).setPreferredWidth(140);
-        table.getColumnModel().getColumn(3).setPreferredWidth(90);
-        table.getColumnModel().getColumn(4).setPreferredWidth(380);
+        TableColumn checkCol = table.getColumnModel().getColumn(0);
+        checkCol.setPreferredWidth(36);
+        checkCol.setMaxWidth(44);
+        checkCol.setMinWidth(32);
+        table.getColumnModel().getColumn(1).setPreferredWidth(70);
+        table.getColumnModel().getColumn(2).setPreferredWidth(130);
+        table.getColumnModel().getColumn(3).setPreferredWidth(140);
+        table.getColumnModel().getColumn(4).setPreferredWidth(90);
+        table.getColumnModel().getColumn(5).setPreferredWidth(380);
+        // Space / click-toggle helpers when Burp steals Ctrl+click.
+        table.addMouseListener(new MouseAdapter() {
+            @Override
+            public void mousePressed(MouseEvent e) {
+                if (!SwingUtilities.isLeftMouseButton(e)) {
+                    return;
+                }
+                int viewRow = table.rowAtPoint(e.getPoint());
+                int viewCol = table.columnAtPoint(e.getPoint());
+                if (viewRow < 0) {
+                    return;
+                }
+                // Clicking checkbox column: let default editor run.
+                if (viewCol == 0) {
+                    return;
+                }
+                // Ctrl/Cmd+click: toggle checkbox (Burp-safe multi-select).
+                if (e.isControlDown() || e.isMetaDown()) {
+                    int modelRow = table.convertRowIndexToModel(viewRow);
+                    boolean on = Boolean.TRUE.equals(model.getValueAt(modelRow, 0));
+                    model.setValueAt(!on, modelRow, 0);
+                    if (!on) {
+                        table.addRowSelectionInterval(viewRow, viewRow);
+                    } else {
+                        table.removeRowSelectionInterval(viewRow, viewRow);
+                    }
+                }
+            }
+        });
         table.addMouseMotionListener(new java.awt.event.MouseMotionAdapter() {
             @Override
             public void mouseMoved(java.awt.event.MouseEvent e) {
@@ -87,7 +135,7 @@ public final class ProcessSelectorPanel extends JPanel {
                     return;
                 }
                 int modelRow = table.convertRowIndexToModel(viewRow);
-                int pid = (Integer) model.getValueAt(modelRow, 0);
+                int pid = (Integer) model.getValueAt(modelRow, 1);
                 ProcessInfo info = cache.stream().filter(p -> p.pid() == pid).findFirst().orElse(null);
                 if (info == null || info.displayCommandLine().isBlank()) {
                     table.setToolTipText(I18n.get("process.role_hint"));
@@ -168,6 +216,7 @@ public final class ProcessSelectorPanel extends JPanel {
                     model.setRowCount(0);
                     for (ProcessInfo p : cache) {
                         model.addRow(new Object[]{
+                                Boolean.FALSE,
                                 p.pid(),
                                 p.name(),
                                 p.roleDisplay(),
@@ -194,7 +243,7 @@ public final class ProcessSelectorPanel extends JPanel {
                 @Override
                 public boolean include(Entry<? extends DefaultTableModel, ? extends Integer> entry) {
                     int modelRow = entry.getIdentifier();
-                    int pid = (Integer) model.getValueAt(modelRow, 0);
+                    int pid = (Integer) model.getValueAt(modelRow, 1);
                     ProcessInfo info = cache.stream().filter(p -> p.pid() == pid).findFirst().orElse(null);
                     if (info != null) {
                         String hay = (info.name() + ' ' + info.role() + ' ' + info.user()
@@ -215,24 +264,10 @@ public final class ProcessSelectorPanel extends JPanel {
     }
 
     private void injectSelected(boolean group) {
-        int[] viewRows = table.getSelectedRows();
-        if (viewRows.length == 0) {
+        List<ProcessInfo> selected = resolveSelectedProcesses();
+        if (selected.isEmpty()) {
             JOptionPane.showMessageDialog(this, I18n.get("process.select_first"), I18n.get("app.name"), JOptionPane.WARNING_MESSAGE);
             return;
-        }
-
-        List<ProcessInfo> selected = new ArrayList<>();
-        for (int viewRow : viewRows) {
-            int modelRow = table.convertRowIndexToModel(viewRow);
-            int pid = (Integer) model.getValueAt(modelRow, 0);
-            ProcessInfo info = cache.stream().filter(p -> p.pid() == pid).findFirst().orElse(null);
-            if (info == null) {
-                info = new ProcessInfo(pid, String.valueOf(model.getValueAt(modelRow, 1)),
-                        String.valueOf(model.getValueAt(modelRow, 4)),
-                        String.valueOf(model.getValueAt(modelRow, 3)),
-                        "");
-            }
-            selected.add(info);
         }
 
         ProcessInfo seed = selected.get(0);
@@ -307,5 +342,39 @@ public final class ProcessSelectorPanel extends JPanel {
                 }
             }
         }.execute();
+    }
+
+    /**
+     * Prefer checkbox column (works inside Burp). Fall back to highlighted rows
+     * (Shift-drag / Ctrl+click when the host does not steal modifiers).
+     */
+    private List<ProcessInfo> resolveSelectedProcesses() {
+        Set<Integer> modelRows = new LinkedHashSet<>();
+        for (int i = 0; i < model.getRowCount(); i++) {
+            if (Boolean.TRUE.equals(model.getValueAt(i, 0))) {
+                modelRows.add(i);
+            }
+        }
+        if (modelRows.isEmpty()) {
+            for (int viewRow : table.getSelectedRows()) {
+                modelRows.add(table.convertRowIndexToModel(viewRow));
+            }
+        }
+        List<ProcessInfo> selected = new ArrayList<>();
+        for (int modelRow : modelRows) {
+            int pid = (Integer) model.getValueAt(modelRow, 1);
+            ProcessInfo info = cache.stream().filter(p -> p.pid() == pid).findFirst().orElse(null);
+            if (info == null) {
+                info = new ProcessInfo(
+                        pid,
+                        String.valueOf(model.getValueAt(modelRow, 2)),
+                        String.valueOf(model.getValueAt(modelRow, 5)),
+                        String.valueOf(model.getValueAt(modelRow, 4)),
+                        ""
+                );
+            }
+            selected.add(info);
+        }
+        return selected;
     }
 }
