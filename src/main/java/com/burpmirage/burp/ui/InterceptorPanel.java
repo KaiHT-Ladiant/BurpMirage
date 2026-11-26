@@ -215,14 +215,13 @@ public final class InterceptorPanel extends JPanel {
         }
         byte[] edited = hexEditor.getData();
         byte[] original = current.originalData();
-        if (edited.length == original.length) {
-            // Same capacity: sync length prefixes then deliver logical wire length.
-            byte[] prepared = HexUtils.applyLogicalLength(original, edited);
-            hexEditor.setData(prepared);
+        // Auto-fix Content-Length / binary frame length for the server.
+        byte[] prepared = HexUtils.prepareEditedPacket(original, edited);
+        hexEditor.setData(prepared);
+        if (prepared.length == original.length) {
             controller.forwardCurrent(HexUtils.forWireDelivery(original, prepared));
         } else {
-            // Editor grew/shrunk the buffer — deliver as-is (push/pull).
-            controller.forwardCurrent(edited);
+            controller.forwardCurrent(prepared);
         }
         clearView();
     }

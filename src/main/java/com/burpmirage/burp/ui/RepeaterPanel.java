@@ -122,8 +122,8 @@ public final class RepeaterPanel extends JPanel {
     }
 
     private void send() {
-        byte[] data = requestEditor.getData();
-        if (data.length == 0) {
+        byte[] raw = requestEditor.getData();
+        if (raw.length == 0) {
             JOptionPane.showMessageDialog(this, I18n.get("repeater.nothing"), I18n.get("tab.repeater"), JOptionPane.WARNING_MESSAGE);
             return;
         }
@@ -136,6 +136,10 @@ public final class RepeaterPanel extends JPanel {
             );
             return;
         }
+
+        // Auto-fix Content-Length / frame length before inject (like Burp Forward).
+        byte[] data = HexUtils.prepareEditedPacket(raw, raw);
+        requestEditor.setData(data);
 
         String requestId = "R-" + UUID.randomUUID().toString().substring(0, 8);
         String peer = peerField.getText() == null ? "" : peerField.getText().trim();

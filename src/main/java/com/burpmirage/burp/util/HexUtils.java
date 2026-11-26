@@ -351,6 +351,133 @@ public final class HexUtils {
     }
 
     /**
+     * Prepare edited bytes for Forward / Repeater Send.
+     * <ul>
+     *   <li>HTTP(S) plaintext: rewrite {@code Content-Length} to match body size (like Burp).</li>
+     *   <li>Same buffer size: sync binary length prefixes + leading frame length.</li>
+     *   <li>Grown/shrunk buffer: rewrite leading u8/u16/u32 frame length that matched old total.</li>
+     * </ul>
+     */
+    public static byte[] prepareEditedPacket(byte[] original, byte[] edited) {
+        if (edited == null) {
+            return new byte[0];
+        }
+        byte[] out = edited.clone();
+        if (looksLikeHttpMessage(out)) {
+            return updateHttpContentLength(out);
+        }
+        byte[] base = original == null ? new byte[0] : original;
+        if (base.length == out.length && base.length > 0) {
+            return applyLogicalLength(base, out);
+        }
+        return rewriteLeadingFrameLengthForNewSize(base, out);
+    }
+
+    /** True when buffer looks like an HTTP/1.x request or response. */
+    public static boolean looksLikeHttpMessage(byte[] data) {
+        if (data == null || data.length < 12) {
+            return false;
+        }
+        String head = new String(data, 0, Math.min(data.length, 16), StandardCharsets.ISO_8859_1);
+        return head.startsWith("GET ")
+                || head.startsWith("POST ")
+                || head.startsWith("PUT ")
+                || head.startsWith("HEAD ")
+                || head.startsWith("PATCH ")
+                || head.startsWith("DELETE ")
+                || head.startsWith("OPTIONS ")
+                || head.startsWith("HTTP/1.");
+    }
+
+    /**
+     * Rewrite {@code Content-Length} to the current body size (bytes after {@code \r\n\r\n}).
+     * If the header is missing and a body exists, inserts {@code Content-Length}.
+     */
+    public static byte[] updateHttpContentLength(byte[] data) {
+        if (data == null || data.length == 0) {
+            return new byte[0];
+        }
+        int sep = indexOfHeaderBodySeparator(data);
+        if (sep < 0) {
+            return data.clone();
+        }
+        int bodyStart = sep + 4;
+        int bodyLen = Math.max(0, data.length - bodyStart);
+        String headers = new String(data, 0, sep, StandardCharsets.ISO_8859_1);
+        String body = new String(data, bodyStart, bodyLen, StandardCharsets.ISO_8859_1);
+
+        Pattern cl = Pattern.compile("(?im)^Content-Length:\\s*\\d+\\s*$");
+        Matcher m = cl.matcher(headers);
+        String newHeaders;
+        if (m.find()) {
+            newHeaders = m.replaceFirst("Content-Length: " + bodyLen);
+        } else {
+            // Insert before end of headers block
+            newHeaders = headers + "\r\nContent-Length: " + bodyLen;
+        }
+        byte[] hb = (newHeaders + "\r\n\r\n").getBytes(StandardCharsets.ISO_8859_1);
+        byte[] out = new byte[hb.length + bodyLen];
+        System.arraycopy(hb, 0, out, 0, hb.length);
+        if (bodyLen > 0) {
+            System.arraycopy(data, bodyStart, out, hb.length, bodyLen);
+        }
+        return out;
+    }
+
+    private static int indexOfHeaderBodySeparator(byte[] data) {
+        for (int i = 0; i + 3 < data.length; i++) {
+            if (data[i] == '\r' && data[i + 1] == '\n' && data[i + 2] == '\r' && data[i + 3] == '\n') {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    /**
+     * When packet length changes, rewrite a leading length field that previously encoded
+     * the old total (or total−header) so the server still sees a consistent frame size.
+     */
+    public static byte[] rewriteLeadingFrameLengthForNewSize(byte[] original, byte[] edited) {
+        if (edited == null) {
+            return new byte[0];
+        }
+        byte[] out = edited.clone();
+        if (original == null || original.length == 0 || out.length == 0) {
+            return out;
+        }
+        int oldTotal = original.length;
+        int newTotal = out.length;
+        if (oldTotal == newTotal) {
+            return out;
+        }
+        int[] oldCandidates = {
+                oldTotal,
+                oldTotal - 1,
+                oldTotal - 2,
+                oldTotal - 4,
+                endExcludingTrailingZeros(original)
+        };
+        int[] newCandidates = {
+                newTotal,
+                newTotal - 1,
+                newTotal - 2,
+                newTotal - 4,
+                endExcludingTrailingZeros(out)
+        };
+        for (int i = 0; i < oldCandidates.length; i++) {
+            int oldV = oldCandidates[i];
+            int newV = newCandidates[Math.min(i, newCandidates.length - 1)];
+            if (oldV <= 0 || newV <= 0) {
+                continue;
+            }
+            if (tryWriteLengthAt(out, 0, oldV, newV)) {
+                return out;
+            }
+        }
+        return out;
+    }
+
+    /**
      * Wire length to hand to Winsock ({@code send}/{@code recv} len) after logical edits.
      * Prefers a leading frame-length field; otherwise trims trailing {@code 0x00} introduced
      * by shortening content; never exceeds buffer capacity.

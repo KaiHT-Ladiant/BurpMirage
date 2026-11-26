@@ -9,6 +9,7 @@ import javax.swing.JLabel;
 import javax.swing.JPanel;
 import javax.swing.JScrollPane;
 import javax.swing.JSplitPane;
+import javax.swing.JTabbedPane;
 import javax.swing.JTextArea;
 import javax.swing.JTextField;
 import javax.swing.KeyStroke;
@@ -35,13 +36,9 @@ import java.util.Deque;
 import java.util.function.Consumer;
 
 /**
- * Binary editor (Hex dump + continuous hex + ASCII).
- * <ul>
- *   <li>Insert/delete shifts total length (push/pull); dump offsets are regenerated.</li>
- *   <li>Offset column in the dump is read-only; edit HEX digits or the ASCII column.</li>
- *   <li>Bottom continuous HEX / ASCII panes live-sync the dump (caret preserved).</li>
- *   <li>{@code Ctrl+Z} / {@code Ctrl+Y} undo buffer snapshots.</li>
- * </ul>
+ * Packet editor with Burp-like tabs: Info (Pretty) / HEX / ASCII (Raw).
+ * Insert/delete shifts length; dump offsets are read-only; Forward/Send should call
+ * {@link HexUtils#prepareEditedPacket} for Content-Length / frame-length sync.
  */
 public final class HexEditorPanel extends JPanel {
     private enum EditSource { DUMP, CONTINUOUS, ASCII }
@@ -51,10 +48,12 @@ public final class HexEditorPanel extends JPanel {
     private final JTextArea dumpArea = new JTextArea();
     private final JTextArea continuousArea = new JTextArea();
     private final JTextArea asciiArea = new JTextArea();
+    private final JTextArea infoPreview = new JTextArea();
     private final JTextField searchField = new JTextField(12);
     private final JTextField replaceField = new JTextField(12);
     private final JTextField metaField = new JTextField();
     private final JLabel lengthLockLabel = new JLabel(" ");
+    private final JTabbedPane tabs = new JTabbedPane();
 
     private byte[] data = new byte[0];
     private int lockedLength = -1;
@@ -80,13 +79,16 @@ public final class HexEditorPanel extends JPanel {
         dumpArea.setFont(mono);
         continuousArea.setFont(mono);
         asciiArea.setFont(mono);
+        infoPreview.setFont(mono);
         dumpArea.setLineWrap(false);
         continuousArea.setLineWrap(true);
         continuousArea.setWrapStyleWord(false);
         asciiArea.setLineWrap(true);
+        infoPreview.setLineWrap(true);
+        infoPreview.setWrapStyleWord(false);
+        infoPreview.setEditable(false);
 
         metaField.setEditable(false);
-        metaField.setBorder(new TitledBorder("Info"));
         metaField.setFont(mono.deriveFont(11f));
         lengthLockLabel.setFont(mono.deriveFont(Font.PLAIN, 11f));
 
@@ -105,31 +107,44 @@ public final class HexEditorPanel extends JPanel {
         undoBtn.addActionListener(e -> undo());
         tools.add(undoBtn);
         tools.add(lengthLockLabel);
+        add(tools, BorderLayout.NORTH);
 
-        JPanel north = new JPanel(new BorderLayout(0, 4));
-        north.add(tools, BorderLayout.NORTH);
-        north.add(metaField, BorderLayout.SOUTH);
-        add(north, BorderLayout.NORTH);
+        // Info ≈ Burp Pretty — metadata + printable preview (read-only)
+        JPanel infoTab = new JPanel(new BorderLayout(4, 4));
+        metaField.setBorder(new TitledBorder("Info"));
+        infoPreview.setBorder(new TitledBorder("Preview (printable)"));
+        infoTab.add(metaField, BorderLayout.NORTH);
+        infoTab.add(new JScrollPane(infoPreview), BorderLayout.CENTER);
 
+        // HEX ≈ Burp Hex — dump (+ continuous when not hexOnly)
         JScrollPane dumpScroll = new JScrollPane(dumpArea);
         dumpScroll.setBorder(new TitledBorder(
-                "Hex Dump — edit HEX / ASCII (offsets read-only). Insert/delete shifts length. Ctrl+Z undo."));
-
+                "Hex Dump — offsets read-only · insert/delete shifts length · Ctrl+Z"));
+        JPanel hexTab = new JPanel(new BorderLayout(4, 4));
         if (hexOnly) {
-            add(dumpScroll, BorderLayout.CENTER);
+            hexTab.add(dumpScroll, BorderLayout.CENTER);
         } else {
             JScrollPane contScroll = new JScrollPane(continuousArea);
-            contScroll.setBorder(new TitledBorder("Continuous Hex — live-syncs dump (length follows edits)"));
-            JScrollPane asciiScroll = new JScrollPane(asciiArea);
-            asciiScroll.setBorder(new TitledBorder(
-                    "ASCII — insert/delete shifts length, live-syncs dump"));
-
-            JSplitPane bottom = new JSplitPane(JSplitPane.VERTICAL_SPLIT, contScroll, asciiScroll);
-            bottom.setResizeWeight(0.5);
-            JSplitPane main = new JSplitPane(JSplitPane.VERTICAL_SPLIT, dumpScroll, bottom);
-            main.setResizeWeight(0.55);
-            add(main, BorderLayout.CENTER);
+            contScroll.setBorder(new TitledBorder("Continuous Hex"));
+            JSplitPane hexSplit = new JSplitPane(JSplitPane.VERTICAL_SPLIT, dumpScroll, contScroll);
+            hexSplit.setResizeWeight(0.7);
+            hexTab.add(hexSplit, BorderLayout.CENTER);
         }
+
+        // ASCII ≈ Burp Raw — editable ISO-8859-1 / text view
+        JScrollPane asciiScroll = new JScrollPane(asciiArea);
+        asciiScroll.setBorder(new TitledBorder("ASCII / Raw — insert/delete shifts length"));
+
+        tabs.addTab("Info", infoTab);
+        tabs.addTab("HEX", hexTab);
+        tabs.addTab("ASCII", asciiScroll);
+        tabs.setSelectedIndex(1); // default HEX like Burp hex inspectors often used
+        tabs.addChangeListener(e -> {
+            if (!refreshing) {
+                applyFromEditors(true);
+            }
+        });
+        add(tabs, BorderLayout.CENTER);
 
         installFilters();
         installUndoKeys(this);
@@ -357,12 +372,32 @@ public final class HexEditorPanel extends JPanel {
             dumpArea.setText(dump);
             continuousArea.setText(cont);
             asciiArea.setText(ascii);
+            infoPreview.setText(buildInfoPreview(data));
             dumpArea.setCaretPosition(clamp(dumpCaret, dump.length()));
             continuousArea.setCaretPosition(clamp(contCaret, cont.length()));
             asciiArea.setCaretPosition(clamp(asciiCaret, ascii.length()));
         } finally {
             refreshing = false;
         }
+    }
+
+    private static String buildInfoPreview(byte[] bytes) {
+        if (bytes == null || bytes.length == 0) {
+            return "";
+        }
+        if (HexUtils.looksLikeHttpMessage(bytes)) {
+            return new String(bytes, StandardCharsets.ISO_8859_1);
+        }
+        StringBuilder sb = new StringBuilder(bytes.length);
+        for (byte value : bytes) {
+            int b = value & 0xFF;
+            if (b == '\n' || b == '\r' || b == '\t' || (b >= 0x20 && b < 0x7F)) {
+                sb.append((char) b);
+            } else {
+                sb.append('.');
+            }
+        }
+        return sb.toString();
     }
 
     private static int clamp(int caret, int len) {
