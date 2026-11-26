@@ -109,20 +109,19 @@ public final class HexUtils {
             while (m.find()) {
                 lineBytes.add((byte) Integer.parseInt(m.group(1), 16));
             }
-            if (asciiPart != null && !lineBytes.isEmpty()) {
-                // Overwrite mode: ASCII column is 1:1 with hex bytes on this line.
-                // Shorter ASCII (user deleted chars) → remaining bytes become 0x00 (not "keep old hex").
-                // '.' keeps existing hex only when that hex was already non-printable; otherwise '.' is 0x2E.
-                // For explicit clear-to-null, prefer deleting (shorter column) or editing HEX to 00.
+            if (asciiPart != null) {
+                // ASCII column length drives the line: shorter → drop trailing bytes (shift),
+                // longer → append bytes. '.' keeps non-printable hex; otherwise write the char.
+                while (lineBytes.size() > asciiPart.length()) {
+                    lineBytes.remove(lineBytes.size() - 1);
+                }
+                while (lineBytes.size() < asciiPart.length()) {
+                    lineBytes.add((byte) 0x2E);
+                }
                 for (int i = 0; i < lineBytes.size(); i++) {
-                    if (i >= asciiPart.length()) {
-                        lineBytes.set(i, (byte) 0);
-                        continue;
-                    }
                     char c = asciiPart.charAt(i);
                     int prev = lineBytes.get(i) & 0xFF;
                     if (c == '.' && (prev < 0x20 || prev >= 0x7F)) {
-                        // placeholder for existing non-printable — keep hex
                         continue;
                     }
                     lineBytes.set(i, (byte) (c & 0xFF));
@@ -188,6 +187,68 @@ public final class HexUtils {
         }
         int asciiStart = lineStart + sep + 2;
         return safe >= asciiStart;
+    }
+
+    /**
+     * Offset column is {@code NNNNNNNN  } (8 hex digits + 2 spaces) at each line start.
+     * Edits here should be blocked — addresses are regenerated from byte length.
+     */
+    public static boolean isDumpCaretInOffsetColumn(String dump, int caret) {
+        if (dump == null || caret < 0 || dump.isEmpty()) {
+            return false;
+        }
+        int safe = Math.min(caret, dump.length());
+        int lineStart = dump.lastIndexOf('\n', Math.max(0, safe - 1)) + 1;
+        int lineEnd = dump.indexOf('\n', safe);
+        if (lineEnd < 0) {
+            lineEnd = dump.length();
+        }
+        String line = dump.substring(lineStart, lineEnd);
+        int col = safe - lineStart;
+        Matcher om = Pattern.compile("^[0-9A-Fa-f]{4,8}\\s{1,2}").matcher(line);
+        return om.find() && col < om.end();
+    }
+
+    /** Document offset of the first HEX digit on the line containing {@code caret}. */
+    public static int dumpHexColumnStart(String dump, int caret) {
+        if (dump == null || dump.isEmpty()) {
+            return 0;
+        }
+        int safe = Math.min(Math.max(caret, 0), dump.length());
+        int lineStart = dump.lastIndexOf('\n', Math.max(0, safe - 1)) + 1;
+        int lineEnd = dump.indexOf('\n', safe);
+        if (lineEnd < 0) {
+            lineEnd = dump.length();
+        }
+        String line = dump.substring(lineStart, lineEnd);
+        Matcher om = Pattern.compile("^[0-9A-Fa-f]{4,8}\\s{1,2}").matcher(line);
+        if (om.find()) {
+            return lineStart + om.end();
+        }
+        return lineStart;
+    }
+
+    /** True when hex-dump hex columns contain an odd number of hex digits (mid-nibble edit). */
+    public static boolean dumpHexDigitsIncomplete(String dump) {
+        if (dump == null || dump.isBlank()) {
+            return false;
+        }
+        int digits = 0;
+        for (String line : dump.split("\\R", -1)) {
+            if (line.isBlank()) {
+                continue;
+            }
+            String content = line.replaceFirst("^\\s*[0-9A-Fa-f]{4,8}\\s+", "");
+            int sep = content.indexOf(" |");
+            String hexPart = sep >= 0 ? content.substring(0, sep) : content;
+            for (int i = 0; i < hexPart.length(); i++) {
+                char c = hexPart.charAt(i);
+                if ((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+                    digits++;
+                }
+            }
+        }
+        return (digits & 1) == 1;
     }
 
     public static String toAsciiPreview(byte[] data, int max) {

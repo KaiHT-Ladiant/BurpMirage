@@ -35,12 +35,12 @@ import java.util.Deque;
 import java.util.function.Consumer;
 
 /**
- * Fixed-length binary editor (Hex dump + continuous hex + ASCII).
+ * Binary editor (Hex dump + continuous hex + ASCII).
  * <ul>
- *   <li>HEX and ASCII edits both work; dump applies HEX-only or ASCII-overwrite by caret region.</li>
- *   <li>Deleting in ASCII zeroes bytes ({@code 0x00}) instead of resurrecting old HEX.</li>
+ *   <li>Insert/delete shifts total length (push/pull); dump offsets are regenerated.</li>
+ *   <li>Offset column in the dump is read-only; edit HEX digits or the ASCII column.</li>
  *   <li>Bottom continuous HEX / ASCII panes live-sync the dump (caret preserved).</li>
- *   <li>{@code Ctrl+Z} / {@code Ctrl+Y} undo buffer snapshots (document undo is cleared by refresh).</li>
+ *   <li>{@code Ctrl+Z} / {@code Ctrl+Y} undo buffer snapshots.</li>
  * </ul>
  */
 public final class HexEditorPanel extends JPanel {
@@ -113,16 +113,16 @@ public final class HexEditorPanel extends JPanel {
 
         JScrollPane dumpScroll = new JScrollPane(dumpArea);
         dumpScroll.setBorder(new TitledBorder(
-                "Hex Dump — edit HEX digits or ASCII column (delete → 00). Ctrl+Z undo."));
+                "Hex Dump — edit HEX / ASCII (offsets read-only). Insert/delete shifts length. Ctrl+Z undo."));
 
         if (hexOnly) {
             add(dumpScroll, BorderLayout.CENTER);
         } else {
             JScrollPane contScroll = new JScrollPane(continuousArea);
-            contScroll.setBorder(new TitledBorder("Continuous Hex — live-syncs dump"));
+            contScroll.setBorder(new TitledBorder("Continuous Hex — live-syncs dump (length follows edits)"));
             JScrollPane asciiScroll = new JScrollPane(asciiArea);
             asciiScroll.setBorder(new TitledBorder(
-                    "ASCII — fixed length overwrite (Backspace/Delete → 00), live-syncs dump"));
+                    "ASCII — insert/delete shifts length, live-syncs dump"));
 
             JSplitPane bottom = new JSplitPane(JSplitPane.VERTICAL_SPLIT, contScroll, asciiScroll);
             bottom.setResizeWeight(0.5);
@@ -165,8 +165,10 @@ public final class HexEditorPanel extends JPanel {
     }
 
     private void installFilters() {
-        // Continuous hex: max digits = lockedLength * 2
+        // Continuous hex: allow grow/shrink (only hex digits + whitespace). Cap runaway paste.
         ((AbstractDocument) continuousArea.getDocument()).setDocumentFilter(new DocumentFilter() {
+            private static final int MAX_DIGITS = 2 * 1024 * 1024;
+
             @Override
             public void insertString(FilterBypass fb, int offset, String string, AttributeSet attr)
                     throws BadLocationException {
@@ -176,79 +178,77 @@ public final class HexEditorPanel extends JPanel {
             @Override
             public void replace(FilterBypass fb, int offset, int length, String text, AttributeSet attrs)
                     throws BadLocationException {
-                if (refreshing || lockedLength < 0) {
+                if (refreshing) {
                     super.replace(fb, offset, length, text, attrs);
                     return;
                 }
-                String incoming = text == null ? "" : text;
+                String incoming = text == null ? "" : text.replaceAll("[^0-9A-Fa-f\\s]", "");
                 String current = fb.getDocument().getText(0, fb.getDocument().getLength());
                 String next = current.substring(0, offset) + incoming + current.substring(offset + length);
-                if (next.replaceAll("[^0-9A-Fa-f]", "").length() > lockedLength * 2) {
+                if (next.replaceAll("[^0-9A-Fa-f]", "").length() > MAX_DIGITS) {
                     return;
                 }
-                super.replace(fb, offset, length, text, attrs);
+                super.replace(fb, offset, length, incoming, attrs);
             }
         });
 
-        // ASCII pane: fixed-length overwrite. Delete/backspace writes NUL, does not shrink.
-        ((AbstractDocument) asciiArea.getDocument()).setDocumentFilter(new DocumentFilter() {
+        // Dump: block edits in the offset column (addresses are decorative / regenerated).
+        ((AbstractDocument) dumpArea.getDocument()).setDocumentFilter(new DocumentFilter() {
             @Override
             public void insertString(FilterBypass fb, int offset, String string, AttributeSet attr)
                     throws BadLocationException {
-                if (string == null || string.isEmpty()) {
-                    return;
-                }
-                replace(fb, offset, string.length(), string, attr);
+                replace(fb, offset, 0, string, attr);
             }
 
             @Override
             public void remove(FilterBypass fb, int offset, int length) throws BadLocationException {
-                if (refreshing || lockedLength < 0) {
+                if (refreshing) {
                     super.remove(fb, offset, length);
                     return;
                 }
-                // Replace deleted span with NUL so buffer length stays lockedLength.
-                char[] zeros = new char[length];
-                Arrays.fill(zeros, '\0');
-                super.replace(fb, offset, length, new String(zeros), null);
+                String doc = fb.getDocument().getText(0, fb.getDocument().getLength());
+                if (touchesOffsetColumn(doc, offset, length)) {
+                    int hexStart = HexUtils.dumpHexColumnStart(doc, offset);
+                    dumpArea.setCaretPosition(clamp(hexStart, doc.length()));
+                    return;
+                }
+                super.remove(fb, offset, length);
             }
 
             @Override
             public void replace(FilterBypass fb, int offset, int length, String text, AttributeSet attrs)
                     throws BadLocationException {
-                if (refreshing || lockedLength < 0) {
+                if (refreshing) {
                     super.replace(fb, offset, length, text, attrs);
                     return;
                 }
-                String incoming = text == null ? "" : text;
-                int docLen = fb.getDocument().getLength();
-                if (docLen != lockedLength) {
-                    // Allow refresh/setText to establish exact length.
-                    super.replace(fb, offset, length, text, attrs);
+                String doc = fb.getDocument().getText(0, fb.getDocument().getLength());
+                if (touchesOffsetColumn(doc, offset, Math.max(length, text == null ? 0 : 1))) {
+                    int hexStart = HexUtils.dumpHexColumnStart(doc, offset);
+                    dumpArea.setCaretPosition(clamp(hexStart, doc.length()));
+                    // If selection was only in offset, ignore; otherwise apply at hex start.
+                    if (length > 0 && text != null && !text.isEmpty()
+                            && !HexUtils.isDumpCaretInOffsetColumn(doc, offset)) {
+                        super.replace(fb, hexStart, 0, text, attrs);
+                    }
                     return;
                 }
-                if (incoming.isEmpty()) {
-                    char[] zeros = new char[length];
-                    Arrays.fill(zeros, '\0');
-                    super.replace(fb, offset, length, new String(zeros), attrs);
-                    return;
+                super.replace(fb, offset, length, text, attrs);
+            }
+
+            private boolean touchesOffsetColumn(String doc, int offset, int length) {
+                if (HexUtils.isDumpCaretInOffsetColumn(doc, offset)) {
+                    return true;
                 }
-                // Overwrite in place; do not grow past lockedLength.
-                int write = Math.min(incoming.length(), lockedLength - offset);
-                if (write <= 0) {
-                    return;
+                if (length <= 0) {
+                    return false;
                 }
-                int replaceLen = Math.max(length, write);
-                if (offset + replaceLen > lockedLength) {
-                    replaceLen = lockedLength - offset;
-                }
-                String chunk = incoming.substring(0, write);
-                if (write < replaceLen) {
-                    chunk = chunk + String.valueOf('\0').repeat(replaceLen - write);
-                }
-                super.replace(fb, offset, replaceLen, chunk.substring(0, replaceLen), attrs);
+                int end = Math.min(doc.length(), offset + length - 1);
+                return HexUtils.isDumpCaretInOffsetColumn(doc, end);
             }
         });
+
+        // ASCII pane: free insert/delete (length follows text).
     }
 
     private DocumentListener track(EditSource source) {
@@ -343,8 +343,8 @@ public final class HexEditorPanel extends JPanel {
         if (lockedLength < 0) {
             lengthLockLabel.setText(" ");
         } else {
-            lengthLockLabel.setText("Length locked: " + lockedLength
-                    + " bytes · HEX/ASCII editable · delete→00 · Ctrl+Z undo");
+            lengthLockLabel.setText("Length: " + lockedLength
+                    + " bytes · insert/delete shifts · offsets read-only · Ctrl+Z undo");
         }
     }
 
@@ -369,13 +369,6 @@ public final class HexEditorPanel extends JPanel {
         return Math.max(0, Math.min(caret, len));
     }
 
-    private byte[] fitLocked(byte[] parsed) {
-        if (lockedLength < 0) {
-            return parsed != null ? parsed : new byte[0];
-        }
-        return HexUtils.fitLength(parsed, lockedLength);
-    }
-
     private void applyFromEditors(boolean syncPrefixes) {
         int dumpCaret = dumpArea.getCaretPosition();
         int contCaret = continuousArea.getCaretPosition();
@@ -384,13 +377,13 @@ public final class HexEditorPanel extends JPanel {
         byte[] parsed;
         EditSource source = hexOnly ? EditSource.DUMP : lastEdit;
         switch (source) {
-            case ASCII -> parsed = asciiBytesFixed();
+            case ASCII -> parsed = asciiArea.getText().getBytes(StandardCharsets.ISO_8859_1);
             case CONTINUOUS -> {
                 String cleaned = continuousArea.getText() == null
                         ? ""
                         : continuousArea.getText().replaceAll("[^0-9A-Fa-f]", "");
-                // Skip while still typing (odd length or incomplete vs lock).
-                if (lockedLength >= 0 && cleaned.length() != lockedLength * 2) {
+                // Skip while still typing a half-byte.
+                if ((cleaned.length() & 1) == 1) {
                     return;
                 }
                 parsed = HexUtils.fromContinuousHex(continuousArea.getText());
@@ -398,42 +391,41 @@ public final class HexEditorPanel extends JPanel {
             case DUMP -> {
                 String dump = dumpArea.getText();
                 if (dump == null || dump.isBlank()) {
-                    parsed = data;
+                    parsed = new byte[0];
                     break;
+                }
+                if (HexUtils.dumpHexDigitsIncomplete(dump)
+                        && !HexUtils.isDumpCaretInAsciiColumn(dump, dumpCaret)) {
+                    // Mid-nibble HEX edit — wait for a complete byte.
+                    return;
                 }
                 boolean inAscii = HexUtils.isDumpCaretInAsciiColumn(dump, dumpCaret);
                 if (inAscii) {
-                    // ASCII overwrite: shorter column → remaining bytes 0x00
+                    // ASCII column edits can shorten/lengthen that line's bytes → whole buffer shifts.
                     parsed = HexUtils.fromHexDump(dump);
                 } else {
                     parsed = HexUtils.fromHexDumpHexOnly(dump);
-                    // Incomplete hex nibble/token mid-edit — don't zero-pad the rest away.
-                    if (lockedLength >= 0 && parsed.length != lockedLength) {
-                        return;
-                    }
                 }
             }
             default -> parsed = data;
         }
-        parsed = fitLocked(parsed);
-        if (syncPrefixes) {
+        if (parsed == null) {
+            parsed = new byte[0];
+        }
+        // Same-length edits: keep framing length-prefix sync. Length changes: accept push/pull as-is.
+        if (syncPrefixes && previous.length == parsed.length && previous.length > 0) {
             parsed = HexUtils.applyLogicalLength(previous, parsed);
         }
         if (Arrays.equals(previous, parsed)) {
-            // Still refresh so HEX/ASCII/continuous panes stay visually in sync.
             refreshViews(source, dumpCaret, contCaret, asciiCaret);
             return;
         }
         pushUndo(previous);
         data = parsed;
+        lockedLength = data.length;
+        updateLengthLockLabel();
         refreshViews(source, dumpCaret, contCaret, asciiCaret);
         changeListener.accept(data);
-    }
-
-    /** ASCII pane → bytes, always exactly lockedLength (NUL-padded). */
-    private byte[] asciiBytesFixed() {
-        byte[] raw = asciiArea.getText().getBytes(StandardCharsets.ISO_8859_1);
-        return fitLocked(raw);
     }
 
     private void pushUndo(byte[] previous) {
@@ -482,11 +474,14 @@ public final class HexEditorPanel extends JPanel {
         } else {
             next = HexUtils.replaceAscii(data, search, replace == null ? "" : replace);
         }
-        next = fitLocked(next);
-        next = HexUtils.applyLogicalLength(previous, next);
+        if (previous.length == next.length && previous.length > 0) {
+            next = HexUtils.applyLogicalLength(previous, next);
+        }
         if (!Arrays.equals(previous, next)) {
             pushUndo(previous);
             data = next;
+            lockedLength = data.length;
+            updateLengthLockLabel();
         }
         lastEdit = EditSource.DUMP;
         refreshViews(EditSource.DUMP, 0, 0, 0);
