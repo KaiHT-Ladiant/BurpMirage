@@ -13,12 +13,12 @@ import javax.swing.JLabel;
 import javax.swing.JOptionPane;
 import javax.swing.JPanel;
 import javax.swing.JSplitPane;
-import javax.swing.JTextArea;
 import javax.swing.JTextField;
 import javax.swing.SwingUtilities;
 import javax.swing.border.EmptyBorder;
 import javax.swing.border.TitledBorder;
 import java.awt.BorderLayout;
+import java.awt.Color;
 import java.awt.FlowLayout;
 import java.awt.Font;
 import java.time.Instant;
@@ -30,8 +30,9 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 
 /**
- * Repeater with request/response pairing. Hex-dump-only editors for space.
- * Raw TCP (not HTTP) — response = next RECV after Send.
+ * Burp-style Repeater: Request | Response side-by-side, Send on the toolbar.
+ * Raw TCP pairing (Send → next RECV), not HTTP Content-Length.
+ * Shortcut: Ctrl+R (when this tab is active) sends the request.
  */
 public final class RepeaterPanel extends JPanel {
     private static final DateTimeFormatter TS =
@@ -44,7 +45,7 @@ public final class RepeaterPanel extends JPanel {
     private final JTextField peerField = new JTextField(28);
     private final JCheckBox anyPeer = new JCheckBox(I18n.get("repeater.any_peer"), true);
     private final JLabel status = new JLabel(" ");
-    private final JTextArea pairInfo = new JTextArea(4, 40);
+    private final JButton sendButton = new JButton(I18n.get("repeater.send"));
 
     private final AtomicLong awaitUntilMs = new AtomicLong(0);
     private final AtomicReference<String> awaitRequestId = new AtomicReference<>("");
@@ -52,36 +53,35 @@ public final class RepeaterPanel extends JPanel {
     private volatile String lastRequestSummary = "";
 
     public RepeaterPanel(BridgeServer bridge, HistoryStore history) {
-        super(new BorderLayout(8, 8));
+        super(new BorderLayout(6, 6));
         this.bridge = bridge;
         this.history = history;
-        setBorder(new EmptyBorder(8, 8, 8, 8));
+        setBorder(new EmptyBorder(6, 6, 6, 6));
 
         responseEditor.setEditable(false);
 
-        pairInfo.setEditable(false);
-        pairInfo.setFont(new Font(Font.MONOSPACED, Font.PLAIN, 12));
-        pairInfo.setBorder(new TitledBorder(I18n.get("repeater.pairing")));
-        pairInfo.setText(I18n.get("repeater.pairing.help"));
+        sendButton.setFont(sendButton.getFont().deriveFont(Font.BOLD));
+        sendButton.setBackground(new Color(0xF5, 0xA6, 0x23));
+        sendButton.setForeground(Color.BLACK);
+        sendButton.setOpaque(true);
+        sendButton.setFocusPainted(false);
+        sendButton.addActionListener(e -> send());
 
-        JPanel north = new JPanel(new BorderLayout(4, 4));
-        JPanel row1 = new JPanel(new FlowLayout(FlowLayout.LEFT));
-        row1.add(new JLabel(I18n.get("repeater.peer_hint")));
-        row1.add(peerField);
-        row1.add(anyPeer);
-        JButton go = new JButton(I18n.get("repeater.send"));
-        go.addActionListener(e -> send());
         JButton clearResp = new JButton(I18n.get("repeater.clear_response"));
         clearResp.addActionListener(e -> {
             responseEditor.clear();
-            updatePairInfo(null, null);
             status.setText(I18n.get("repeater.response_cleared"));
         });
-        row1.add(go);
-        row1.add(clearResp);
-        north.add(row1, BorderLayout.NORTH);
-        north.add(status, BorderLayout.CENTER);
-        north.add(pairInfo, BorderLayout.SOUTH);
+
+        JPanel toolbar = new JPanel(new BorderLayout(8, 0));
+        JPanel left = new JPanel(new FlowLayout(FlowLayout.LEFT, 6, 2));
+        left.add(sendButton);
+        left.add(clearResp);
+        left.add(new JLabel(I18n.get("repeater.peer_hint")));
+        left.add(peerField);
+        left.add(anyPeer);
+        toolbar.add(left, BorderLayout.WEST);
+        toolbar.add(status, BorderLayout.CENTER);
 
         JPanel reqWrap = new JPanel(new BorderLayout());
         reqWrap.setBorder(new TitledBorder(I18n.get("repeater.request")));
@@ -91,11 +91,13 @@ public final class RepeaterPanel extends JPanel {
         respWrap.setBorder(new TitledBorder(I18n.get("repeater.response")));
         respWrap.add(responseEditor, BorderLayout.CENTER);
 
-        JSplitPane split = new JSplitPane(JSplitPane.VERTICAL_SPLIT, reqWrap, respWrap);
+        // Burp Repeater layout: Request | Response horizontal
+        JSplitPane split = new JSplitPane(JSplitPane.HORIZONTAL_SPLIT, reqWrap, respWrap);
         split.setResizeWeight(0.5);
         split.setDividerLocation(0.5);
+        split.setContinuousLayout(true);
 
-        add(north, BorderLayout.NORTH);
+        add(toolbar, BorderLayout.NORTH);
         add(split, BorderLayout.CENTER);
 
         history.addListener(this::onHistoryPacket);
@@ -117,8 +119,12 @@ public final class RepeaterPanel extends JPanel {
         ));
         requestEditor.setData(packet.data());
         responseEditor.clear();
-        updatePairInfo(null, null);
         status.setText(I18n.get("repeater.loaded_status"));
+    }
+
+    /** Public entry for Ctrl+R when Repeater tab is active. */
+    public void sendRequest() {
+        send();
     }
 
     private void send() {
@@ -156,7 +162,6 @@ public final class RepeaterPanel extends JPanel {
                 data.length,
                 HexUtils.toAsciiPreview(data, 40)
         );
-        updatePairInfo(lastRequestSummary, I18n.get("repeater.waiting"));
         requestEditor.setMeta(I18n.format("repeater.sent_meta", requestId));
 
         boolean ok = bridge.injectSend(data, peer, requestId);
@@ -164,7 +169,6 @@ public final class RepeaterPanel extends JPanel {
             awaitUntilMs.set(0);
             awaitRequestId.set("");
             status.setText(I18n.get("repeater.inject_failed"));
-            updatePairInfo(lastRequestSummary, I18n.get("repeater.failed_inject"));
             return;
         }
 
@@ -236,7 +240,6 @@ public final class RepeaterPanel extends JPanel {
         SwingUtilities.invokeLater(() -> {
             responseEditor.setMeta(respSummary);
             responseEditor.setData(body);
-            updatePairInfo(lastRequestSummary, respSummary);
             status.setText(I18n.format("repeater.paired", reqId, body.length, source));
         });
 
@@ -251,17 +254,6 @@ public final class RepeaterPanel extends JPanel {
         );
         tagged.setStatus(InterceptedPacket.PacketStatus.REPLAYED);
         history.add(tagged);
-    }
-
-    private void updatePairInfo(String req, String res) {
-        StringBuilder sb = new StringBuilder();
-        sb.append(I18n.get("repeater.pair.request")).append('\n')
-                .append(req == null || req.isBlank() ? I18n.get("repeater.pair.none") : req).append('\n');
-        sb.append(I18n.get("repeater.pair.response")).append('\n')
-                .append(res == null || res.isBlank() ? I18n.get("repeater.pair.none") : res).append('\n');
-        sb.append(I18n.get("repeater.pair.footer"));
-        pairInfo.setText(sb.toString());
-        pairInfo.setCaretPosition(0);
     }
 
     private static boolean peerMatches(String expected, String actual) {

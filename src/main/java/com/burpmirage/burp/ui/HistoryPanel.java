@@ -247,11 +247,7 @@ public final class HistoryPanel extends JPanel {
             pairSeq.set(0);
         });
         JButton toRepeater = new JButton(I18n.get("history.to_repeater"));
-        toRepeater.addActionListener(e -> {
-            for (InterceptedPacket p : selectedPackets()) {
-                sendToRepeater.accept(p);
-            }
-        });
+        toRepeater.addActionListener(e -> sendSelectedToRepeater());
         JButton editedOnly = new JButton(I18n.get("history.edited_only"));
         editedOnly.addActionListener(e ->
                 sorter.setRowFilter(RowFilter.regexFilter("✓", COL_EDITED)));
@@ -468,6 +464,18 @@ public final class HistoryPanel extends JPanel {
             }
         }
         table.repaint();
+    }
+
+    /** Send selected history row(s) to Repeater (Ctrl+R on History). */
+    public boolean sendSelectedToRepeater() {
+        List<InterceptedPacket> selected = selectedPackets();
+        if (selected.isEmpty()) {
+            return false;
+        }
+        for (InterceptedPacket p : selected) {
+            sendToRepeater.accept(p);
+        }
+        return true;
     }
 
     private List<InterceptedPacket> selectedPackets() {

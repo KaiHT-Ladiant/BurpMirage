@@ -32,6 +32,7 @@ import java.util.function.Consumer;
 
 /**
  * Live intercept view — Forward: Ctrl+Shift+F, Drop: Ctrl+D.
+ * Suite-wide (MainPanel): Ctrl+T Intercept ON/OFF, Ctrl+R Send to Repeater.
  */
 public final class InterceptorPanel extends JPanel {
     private static final DateTimeFormatter TS =
@@ -113,6 +114,7 @@ public final class InterceptorPanel extends JPanel {
     private void installContextMenu() {
         JPopupMenu menu = new JPopupMenu();
         JMenuItem sendItem = new JMenuItem(I18n.get("intercept.to_repeater"));
+        sendItem.setAccelerator(KeyStroke.getKeyStroke(KeyEvent.VK_R, InputEvent.CTRL_DOWN_MASK));
         sendItem.addActionListener(e -> doSendToRepeater());
         JMenuItem forwardItem = new JMenuItem(I18n.get("intercept.menu.forward"));
         forwardItem.setAccelerator(KeyStroke.getKeyStroke(
@@ -179,14 +181,30 @@ public final class InterceptorPanel extends JPanel {
                 e.consume();
                 return true;
             }
-            if (code == KeyEvent.VK_R && shift) {
-                SwingUtilities.invokeLater(this::doSendToRepeater);
-                e.consume();
-                return true;
-            }
+            // Ctrl+R / Ctrl+T are handled suite-wide in MainPanel.
             return false;
         };
         KeyboardFocusManager.getCurrentKeyboardFocusManager().addKeyEventDispatcher(shortcutDispatcher);
+    }
+
+    /** Toggle Intercept ON/OFF (Ctrl+T). */
+    public void toggleIntercept() {
+        interceptToggle.setSelected(!interceptToggle.isSelected());
+        settings.setInterceptEnabled(interceptToggle.isSelected());
+        applyInterceptButtonStyle();
+    }
+
+    /**
+     * Send the current intercepted packet to Repeater (Ctrl+R on Intercept).
+     *
+     * @return true if a packet was sent
+     */
+    public boolean sendCurrentToRepeater() {
+        if (current == null) {
+            return false;
+        }
+        doSendToRepeater();
+        return true;
     }
 
     private void present(InterceptedPacket packet) {
