@@ -4,6 +4,7 @@ import com.burpmirage.burp.model.InterceptedPacket;
 import com.burpmirage.burp.model.PacketDirection;
 import com.burpmirage.burp.pcap.PcapReader;
 import com.burpmirage.burp.pcap.PcapTcpSegment;
+import com.burpmirage.burp.util.ClipboardUtil;
 import com.burpmirage.burp.util.HexUtils;
 import com.burpmirage.burp.util.I18n;
 
@@ -11,11 +12,15 @@ import javax.swing.JButton;
 import javax.swing.JCheckBox;
 import javax.swing.JFileChooser;
 import javax.swing.JLabel;
+import javax.swing.JMenu;
+import javax.swing.JMenuItem;
 import javax.swing.JPanel;
+import javax.swing.JPopupMenu;
 import javax.swing.JScrollPane;
 import javax.swing.JSplitPane;
 import javax.swing.JTable;
 import javax.swing.JTextField;
+import javax.swing.KeyStroke;
 import javax.swing.ListSelectionModel;
 import javax.swing.RowFilter;
 import javax.swing.SwingWorker;
@@ -30,6 +35,10 @@ import java.awt.BorderLayout;
 import java.awt.Color;
 import java.awt.Component;
 import java.awt.FlowLayout;
+import java.awt.event.InputEvent;
+import java.awt.event.KeyEvent;
+import java.awt.event.MouseAdapter;
+import java.awt.event.MouseEvent;
 import java.nio.file.Path;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
@@ -190,7 +199,91 @@ public final class PcapPanel extends JPanel {
         add(split, BorderLayout.CENTER);
         add(south, BorderLayout.SOUTH);
 
+        table.addMouseListener(new MouseAdapter() {
+            @Override
+            public void mousePressed(MouseEvent e) {
+                maybe(e);
+            }
+
+            @Override
+            public void mouseReleased(MouseEvent e) {
+                maybe(e);
+            }
+
+            private void maybe(MouseEvent e) {
+                if (!e.isPopupTrigger()) {
+                    return;
+                }
+                int row = table.rowAtPoint(e.getPoint());
+                if (row >= 0) {
+                    if (!table.isRowSelected(row)) {
+                        table.setRowSelectionInterval(row, row);
+                    }
+                    showPcapContextMenu(e.getComponent(), e.getX(), e.getY());
+                }
+            }
+        });
+
         status.setText(I18n.get("pcap.ready"));
+    }
+
+    private void showPcapContextMenu(Component invoker, int x, int y) {
+        PcapTcpSegment primary = selectedSegment();
+        JPopupMenu menu = new JPopupMenu();
+        String headerText = primary == null
+                ? I18n.get("menu.no_selection")
+                : (primary.peer() == null || primary.peer().isBlank()
+                ? primary.flowKey()
+                : primary.peer());
+        JMenuItem header = new JMenuItem(headerText);
+        header.setEnabled(false);
+        menu.add(header);
+        menu.addSeparator();
+
+        JMenuItem sendRep = new JMenuItem(I18n.get("menu.send_repeater"));
+        sendRep.setAccelerator(KeyStroke.getKeyStroke(KeyEvent.VK_R, InputEvent.CTRL_DOWN_MASK));
+        sendRep.setEnabled(primary != null || detail.getData().length > 0);
+        sendRep.addActionListener(e -> sendSelectedToRepeater());
+        menu.add(sendRep);
+
+        JMenuItem findHist = new JMenuItem(I18n.get("pcap.find_history"));
+        findHist.setEnabled(primary != null || detail.getData().length >= 4);
+        findHist.addActionListener(e -> findInHistory());
+        menu.add(findHist);
+        menu.addSeparator();
+
+        JMenu copyMenu = new JMenu(I18n.get("menu.copy"));
+        JMenuItem copyPeer = new JMenuItem(I18n.get("menu.copy_peer"));
+        copyPeer.setEnabled(primary != null);
+        copyPeer.addActionListener(e -> {
+            if (primary != null) {
+                ClipboardUtil.copyText(primary.peer() == null ? "" : primary.peer());
+            }
+        });
+        JMenuItem copyAscii = new JMenuItem(I18n.get("menu.copy_ascii"));
+        copyAscii.setEnabled(primary != null || detail.getData().length > 0);
+        copyAscii.addActionListener(e -> {
+            byte[] data = detail.getData();
+            if ((data == null || data.length == 0) && primary != null) {
+                data = primary.payload();
+            }
+            ClipboardUtil.copyText(HexUtils.decodeForDisplay(data));
+        });
+        JMenuItem copyHex = new JMenuItem(I18n.get("menu.copy_hex"));
+        copyHex.setEnabled(primary != null || detail.getData().length > 0);
+        copyHex.addActionListener(e -> {
+            byte[] data = detail.getData();
+            if ((data == null || data.length == 0) && primary != null) {
+                data = primary.payload();
+            }
+            ClipboardUtil.copyText(ClipboardUtil.toHex(data));
+        });
+        copyMenu.add(copyPeer);
+        copyMenu.add(copyAscii);
+        copyMenu.add(copyHex);
+        menu.add(copyMenu);
+
+        menu.show(invoker, x, y);
     }
 
     private void openFile() {

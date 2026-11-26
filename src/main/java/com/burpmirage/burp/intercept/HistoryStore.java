@@ -37,6 +37,14 @@ public final class HistoryStore {
         packets.clear();
     }
 
+    /** Remove packets by id (History UI delete). */
+    public void removeByIds(java.util.Collection<String> ids) {
+        if (ids == null || ids.isEmpty()) {
+            return;
+        }
+        packets.removeIf(p -> p != null && ids.contains(p.id()));
+    }
+
     public List<InterceptedPacket> snapshot() {
         return Collections.unmodifiableList(new ArrayList<>(packets));
     }

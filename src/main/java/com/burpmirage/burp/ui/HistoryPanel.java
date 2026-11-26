@@ -6,9 +6,12 @@ import com.burpmirage.burp.model.PacketDirection;
 import com.burpmirage.burp.util.HexUtils;
 import com.burpmirage.burp.util.I18n;
 
+import com.burpmirage.burp.util.ClipboardUtil;
+
 import javax.swing.ButtonGroup;
 import javax.swing.JButton;
 import javax.swing.JLabel;
+import javax.swing.JMenu;
 import javax.swing.JMenuItem;
 import javax.swing.JPanel;
 import javax.swing.JPopupMenu;
@@ -17,6 +20,7 @@ import javax.swing.JScrollPane;
 import javax.swing.JSplitPane;
 import javax.swing.JTable;
 import javax.swing.JTextField;
+import javax.swing.KeyStroke;
 import javax.swing.ListSelectionModel;
 import javax.swing.RowFilter;
 import javax.swing.SwingUtilities;
@@ -30,6 +34,8 @@ import java.awt.BorderLayout;
 import java.awt.Color;
 import java.awt.Component;
 import java.awt.FlowLayout;
+import java.awt.event.InputEvent;
+import java.awt.event.KeyEvent;
 import java.awt.event.MouseAdapter;
 import java.awt.event.MouseEvent;
 import java.time.ZoneId;
@@ -183,31 +189,6 @@ public final class HistoryPanel extends JPanel {
             }
         });
 
-        JPopupMenu historyMenu = new JPopupMenu();
-        JMenuItem sendRep = new JMenuItem(I18n.get("history.to_repeater"));
-        sendRep.addActionListener(e -> {
-            for (InterceptedPacket p : selectedPackets()) {
-                sendToRepeater.accept(p);
-            }
-        });
-        JMenuItem highlight = new JMenuItem(I18n.get("history.highlight"));
-        highlight.addActionListener(e -> highlightSelected(true));
-        JMenuItem unhighlight = new JMenuItem(I18n.get("history.unhighlight"));
-        unhighlight.addActionListener(e -> highlightSelected(false));
-        JMenuItem clearHighlights = new JMenuItem(I18n.get("history.clear_highlights"));
-        clearHighlights.addActionListener(e -> {
-            highlightedIds.clear();
-            table.repaint();
-        });
-        JMenuItem jumpPair = new JMenuItem(I18n.get("history.jump_pair"));
-        jumpPair.addActionListener(e -> jumpToPairMate());
-        historyMenu.add(sendRep);
-        historyMenu.addSeparator();
-        historyMenu.add(highlight);
-        historyMenu.add(unhighlight);
-        historyMenu.add(clearHighlights);
-        historyMenu.addSeparator();
-        historyMenu.add(jumpPair);
         table.addMouseListener(new MouseAdapter() {
             @Override
             public void mousePressed(MouseEvent e) {
@@ -229,23 +210,14 @@ public final class HistoryPanel extends JPanel {
                     if (!table.isRowSelected(row)) {
                         table.setRowSelectionInterval(row, row);
                     }
-                    historyMenu.show(table, e.getX(), e.getY());
+                    showHistoryContextMenu(e.getComponent(), e.getX(), e.getY());
                 }
             }
         });
 
         JPanel toolbar = new JPanel(new FlowLayout(FlowLayout.LEFT));
         JButton clear = new JButton(I18n.get("history.clear"));
-        clear.addActionListener(e -> {
-            history.clear();
-            rows.clear();
-            model.setRowCount(0);
-            detail.clear();
-            detailMeta.setText(" ");
-            focusPairId = null;
-            highlightedIds.clear();
-            pairSeq.set(0);
-        });
+        clear.addActionListener(e -> clearAll());
         JButton toRepeater = new JButton(I18n.get("history.to_repeater"));
         toRepeater.addActionListener(e -> sendSelectedToRepeater());
         JButton editedOnly = new JButton(I18n.get("history.edited_only"));
@@ -476,6 +448,167 @@ public final class HistoryPanel extends JPanel {
             sendToRepeater.accept(p);
         }
         return true;
+    }
+
+    /** Burp-style right-click menu for History rows. */
+    private void showHistoryContextMenu(Component invoker, int x, int y) {
+        InterceptedPacket primary = selectedPacket();
+        List<InterceptedPacket> selected = selectedPackets();
+        JPopupMenu menu = new JPopupMenu();
+
+        // Header like Burp URL line
+        String headerText = primary == null
+                ? I18n.get("menu.no_selection")
+                : (primary.peer() == null || primary.peer().isBlank()
+                ? primary.apiName()
+                : primary.peer());
+        JMenuItem header = new JMenuItem(headerText);
+        header.setEnabled(false);
+        menu.add(header);
+        menu.addSeparator();
+
+        JMenuItem sendRep = new JMenuItem(I18n.get("menu.send_repeater"));
+        sendRep.setAccelerator(KeyStroke.getKeyStroke(KeyEvent.VK_R, InputEvent.CTRL_DOWN_MASK));
+        sendRep.setEnabled(!selected.isEmpty());
+        sendRep.addActionListener(e -> sendSelectedToRepeater());
+        menu.add(sendRep);
+        menu.addSeparator();
+
+        JMenu highlightMenu = new JMenu(I18n.get("menu.highlight"));
+        JMenuItem highlight = new JMenuItem(I18n.get("history.highlight"));
+        highlight.setEnabled(!selected.isEmpty());
+        highlight.addActionListener(e -> highlightSelected(true));
+        JMenuItem unhighlight = new JMenuItem(I18n.get("history.unhighlight"));
+        unhighlight.setEnabled(!selected.isEmpty());
+        unhighlight.addActionListener(e -> highlightSelected(false));
+        JMenuItem clearHighlights = new JMenuItem(I18n.get("history.clear_highlights"));
+        clearHighlights.addActionListener(e -> {
+            highlightedIds.clear();
+            table.repaint();
+        });
+        highlightMenu.add(highlight);
+        highlightMenu.add(unhighlight);
+        highlightMenu.addSeparator();
+        highlightMenu.add(clearHighlights);
+        menu.add(highlightMenu);
+
+        JMenuItem jumpPair = new JMenuItem(I18n.get("history.jump_pair"));
+        jumpPair.setEnabled(primary != null && primary.pairId() != null);
+        jumpPair.addActionListener(e -> jumpToPairMate());
+        menu.add(jumpPair);
+        menu.addSeparator();
+
+        JMenu copyMenu = new JMenu(I18n.get("menu.copy"));
+        JMenuItem copyPeer = new JMenuItem(I18n.get("menu.copy_peer"));
+        copyPeer.setEnabled(primary != null);
+        copyPeer.addActionListener(e -> {
+            if (primary != null) {
+                ClipboardUtil.copyText(primary.peer() == null ? "" : primary.peer());
+            }
+        });
+        JMenuItem copyAscii = new JMenuItem(I18n.get("menu.copy_ascii"));
+        copyAscii.setEnabled(primary != null);
+        copyAscii.addActionListener(e -> {
+            if (primary != null) {
+                ClipboardUtil.copyText(HexUtils.decodeForDisplay(viewBytes(primary)));
+            }
+        });
+        JMenuItem copyHex = new JMenuItem(I18n.get("menu.copy_hex"));
+        copyHex.setEnabled(primary != null);
+        copyHex.addActionListener(e -> {
+            if (primary != null) {
+                ClipboardUtil.copyText(ClipboardUtil.toHex(viewBytes(primary)));
+            }
+        });
+        JMenuItem copyMeta = new JMenuItem(I18n.get("menu.copy_meta"));
+        copyMeta.setEnabled(primary != null);
+        copyMeta.addActionListener(e -> {
+            if (primary != null) {
+                ClipboardUtil.copyText(I18n.format(
+                        "history.meta",
+                        primary.direction().label(),
+                        primary.apiName(),
+                        primary.peer(),
+                        primary.status().name(),
+                        primary.isModified(),
+                        primary.originalData().length,
+                        primary.data().length
+                ));
+            }
+        });
+        copyMenu.add(copyPeer);
+        copyMenu.add(copyAscii);
+        copyMenu.add(copyHex);
+        copyMenu.add(copyMeta);
+        menu.add(copyMenu);
+        menu.addSeparator();
+
+        JMenuItem deleteItem = new JMenuItem(I18n.get("menu.delete_item"));
+        deleteItem.setEnabled(!selected.isEmpty());
+        deleteItem.addActionListener(e -> deleteSelected());
+        menu.add(deleteItem);
+        JMenuItem clearHistory = new JMenuItem(I18n.get("menu.clear_history"));
+        clearHistory.addActionListener(e -> clearAll());
+        menu.add(clearHistory);
+
+        menu.show(invoker, x, y);
+    }
+
+    private byte[] viewBytes(InterceptedPacket p) {
+        if (p == null) {
+            return new byte[0];
+        }
+        return viewOriginal.isSelected() ? p.originalData() : p.data();
+    }
+
+    private void deleteSelected() {
+        List<InterceptedPacket> selected = selectedPackets();
+        if (selected.isEmpty()) {
+            return;
+        }
+        Set<String> ids = new HashSet<>();
+        for (InterceptedPacket p : selected) {
+            ids.add(p.id());
+            highlightedIds.remove(p.id());
+        }
+        history.removeByIds(ids);
+        rows.removeIf(p -> ids.contains(p.id()));
+        rebuildTableFromRows();
+        detail.clear();
+        detailMeta.setText(" ");
+        focusPairId = null;
+    }
+
+    private void clearAll() {
+        history.clear();
+        rows.clear();
+        model.setRowCount(0);
+        detail.clear();
+        detailMeta.setText(" ");
+        focusPairId = null;
+        highlightedIds.clear();
+        pairSeq.set(0);
+    }
+
+    private void rebuildTableFromRows() {
+        model.setRowCount(0);
+        for (int i = 0; i < rows.size(); i++) {
+            InterceptedPacket packet = rows.get(i);
+            boolean modified = packet.isModified();
+            model.addRow(new Object[]{
+                    i + 1,
+                    TS.format(packet.timestamp()),
+                    packet.direction().label(),
+                    packet.pairId() == null ? "" : packet.pairId(),
+                    packet.apiName(),
+                    packet.peer(),
+                    packet.length(),
+                    modified ? "✓" : "",
+                    packet.status().name(),
+                    (modified ? I18n.format("history.preview.edited", HexUtils.toAsciiPreview(packet.data(), 48))
+                            : HexUtils.toAsciiPreview(packet.data(), 48))
+            });
+        }
     }
 
     private List<InterceptedPacket> selectedPackets() {

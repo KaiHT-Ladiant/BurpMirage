@@ -435,6 +435,10 @@ public final class HexEditorPanel extends JPanel {
         return asciiArea;
     }
 
+    public JTextArea infoPreview() {
+        return infoPreview;
+    }
+
     private void updateLengthLockLabel() {
         if (lockedLength < 0) {
             lengthLockLabel.setText(" ");

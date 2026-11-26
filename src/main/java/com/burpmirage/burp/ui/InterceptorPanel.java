@@ -3,11 +3,13 @@ package com.burpmirage.burp.ui;
 import com.burpmirage.burp.intercept.InterceptController;
 import com.burpmirage.burp.model.ExtensionSettings;
 import com.burpmirage.burp.model.InterceptedPacket;
+import com.burpmirage.burp.util.ClipboardUtil;
 import com.burpmirage.burp.util.HexUtils;
 import com.burpmirage.burp.util.I18n;
 
 import javax.swing.JButton;
 import javax.swing.JLabel;
+import javax.swing.JMenu;
 import javax.swing.JMenuItem;
 import javax.swing.JPanel;
 import javax.swing.JPopupMenu;
@@ -18,6 +20,7 @@ import javax.swing.UIManager;
 import javax.swing.border.EmptyBorder;
 import java.awt.BorderLayout;
 import java.awt.Color;
+import java.awt.Component;
 import java.awt.FlowLayout;
 import java.awt.Font;
 import java.awt.KeyboardFocusManager;
@@ -113,22 +116,6 @@ public final class InterceptorPanel extends JPanel {
     }
 
     private void installContextMenu() {
-        JPopupMenu menu = new JPopupMenu();
-        JMenuItem sendItem = new JMenuItem(I18n.get("intercept.to_repeater"));
-        sendItem.setAccelerator(KeyStroke.getKeyStroke(KeyEvent.VK_R, InputEvent.CTRL_DOWN_MASK));
-        sendItem.addActionListener(e -> doSendToRepeater());
-        JMenuItem forwardItem = new JMenuItem(I18n.get("intercept.menu.forward"));
-        forwardItem.setAccelerator(KeyStroke.getKeyStroke(
-                KeyEvent.VK_F, InputEvent.CTRL_DOWN_MASK | InputEvent.SHIFT_DOWN_MASK));
-        forwardItem.addActionListener(e -> doForward());
-        JMenuItem dropItem = new JMenuItem(I18n.get("intercept.menu.drop"));
-        dropItem.setAccelerator(KeyStroke.getKeyStroke(KeyEvent.VK_D, InputEvent.CTRL_DOWN_MASK));
-        dropItem.addActionListener(e -> doDrop());
-        menu.add(sendItem);
-        menu.addSeparator();
-        menu.add(forwardItem);
-        menu.add(dropItem);
-
         MouseAdapter popup = new MouseAdapter() {
             @Override
             public void mousePressed(MouseEvent e) {
@@ -142,14 +129,61 @@ public final class InterceptorPanel extends JPanel {
 
             private void maybeShow(MouseEvent e) {
                 if (e.isPopupTrigger() && current != null) {
-                    menu.show(e.getComponent(), e.getX(), e.getY());
+                    showInterceptContextMenu(e.getComponent(), e.getX(), e.getY());
                 }
             }
         };
         hexEditor.addMouseListener(popup);
         hexEditor.dumpArea().addMouseListener(popup);
         hexEditor.asciiArea().addMouseListener(popup);
+        hexEditor.infoPreview().addMouseListener(popup);
         addMouseListener(popup);
+    }
+
+    /** Burp-style right-click menu for the live intercept editor. */
+    private void showInterceptContextMenu(Component invoker, int x, int y) {
+        JPopupMenu menu = new JPopupMenu();
+        String peer = current.peer() == null || current.peer().isBlank()
+                ? current.apiName()
+                : current.peer();
+        JMenuItem header = new JMenuItem(peer);
+        header.setEnabled(false);
+        menu.add(header);
+        menu.addSeparator();
+
+        JMenuItem sendItem = new JMenuItem(I18n.get("menu.send_repeater"));
+        sendItem.setAccelerator(KeyStroke.getKeyStroke(KeyEvent.VK_R, InputEvent.CTRL_DOWN_MASK));
+        sendItem.addActionListener(e -> doSendToRepeater());
+        menu.add(sendItem);
+        menu.addSeparator();
+
+        JMenuItem forwardItem = new JMenuItem(I18n.get("intercept.menu.forward"));
+        forwardItem.setAccelerator(KeyStroke.getKeyStroke(
+                KeyEvent.VK_F, InputEvent.CTRL_DOWN_MASK | InputEvent.SHIFT_DOWN_MASK));
+        forwardItem.addActionListener(e -> doForward());
+        JMenuItem dropItem = new JMenuItem(I18n.get("intercept.menu.drop"));
+        dropItem.setAccelerator(KeyStroke.getKeyStroke(KeyEvent.VK_D, InputEvent.CTRL_DOWN_MASK));
+        dropItem.addActionListener(e -> doDrop());
+        menu.add(forwardItem);
+        menu.add(dropItem);
+        menu.addSeparator();
+
+        JMenu copyMenu = new JMenu(I18n.get("menu.copy"));
+        JMenuItem copyPeer = new JMenuItem(I18n.get("menu.copy_peer"));
+        copyPeer.addActionListener(e ->
+                ClipboardUtil.copyText(current.peer() == null ? "" : current.peer()));
+        JMenuItem copyAscii = new JMenuItem(I18n.get("menu.copy_ascii"));
+        copyAscii.addActionListener(e ->
+                ClipboardUtil.copyText(HexUtils.decodeForDisplay(hexEditor.getData())));
+        JMenuItem copyHex = new JMenuItem(I18n.get("menu.copy_hex"));
+        copyHex.addActionListener(e ->
+                ClipboardUtil.copyText(ClipboardUtil.toHex(hexEditor.getData())));
+        copyMenu.add(copyPeer);
+        copyMenu.add(copyAscii);
+        copyMenu.add(copyHex);
+        menu.add(copyMenu);
+
+        menu.show(invoker, x, y);
     }
 
     private void installGlobalShortcuts() {
