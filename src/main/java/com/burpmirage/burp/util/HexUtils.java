@@ -583,6 +583,10 @@ public final class HexUtils {
     /**
      * Rewrite {@code Content-Length} to the current body size (bytes after {@code \r\n\r\n}).
      * If the header is missing and a body exists, inserts {@code Content-Length}.
+     * <p>
+     * Does <b>not</b> shrink a positive {@code Content-Length} when this buffer has an empty
+     * body — common with {@code Expect: 100-continue} or split sends where the body follows
+     * in a later write. Forcing {@code Content-Length: 0} there breaks the request.
      */
     public static byte[] updateHttpContentLength(byte[] data) {
         if (data == null || data.length == 0) {
@@ -595,16 +599,25 @@ public final class HexUtils {
         int bodyStart = sep + 4;
         int bodyLen = Math.max(0, data.length - bodyStart);
         String headers = new String(data, 0, sep, StandardCharsets.ISO_8859_1);
-        String body = new String(data, bodyStart, bodyLen, StandardCharsets.ISO_8859_1);
+
+        Integer declared = parseContentLengthHeader(headers);
+        // Headers-only capture (Expect: 100-continue, deferred body): keep declared CL.
+        if (bodyLen == 0 && declared != null && declared > 0) {
+            return data.clone();
+        }
+        if (declared != null && declared == bodyLen) {
+            return data.clone();
+        }
 
         Pattern cl = Pattern.compile("(?im)^Content-Length:\\s*\\d+\\s*$");
         Matcher m = cl.matcher(headers);
         String newHeaders;
         if (m.find()) {
             newHeaders = m.replaceFirst("Content-Length: " + bodyLen);
-        } else {
-            // Insert before end of headers block
+        } else if (bodyLen > 0) {
             newHeaders = headers + "\r\nContent-Length: " + bodyLen;
+        } else {
+            return data.clone();
         }
         byte[] hb = (newHeaders + "\r\n\r\n").getBytes(StandardCharsets.ISO_8859_1);
         byte[] out = new byte[hb.length + bodyLen];
@@ -613,6 +626,22 @@ public final class HexUtils {
             System.arraycopy(data, bodyStart, out, hb.length, bodyLen);
         }
         return out;
+    }
+
+    /** Parse the first {@code Content-Length} header value, or {@code null} if absent/invalid. */
+    public static Integer parseContentLengthHeader(String headers) {
+        if (headers == null || headers.isEmpty()) {
+            return null;
+        }
+        Matcher m = Pattern.compile("(?im)^Content-Length:\\s*(\\d+)\\s*$").matcher(headers);
+        if (!m.find()) {
+            return null;
+        }
+        try {
+            return Integer.parseInt(m.group(1));
+        } catch (NumberFormatException e) {
+            return null;
+        }
     }
 
     private static int indexOfHeaderBodySeparator(byte[] data) {
