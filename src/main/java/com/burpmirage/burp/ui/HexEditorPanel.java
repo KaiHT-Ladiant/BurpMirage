@@ -23,12 +23,16 @@ import javax.swing.text.AbstractDocument;
 import javax.swing.text.AttributeSet;
 import javax.swing.text.BadLocationException;
 import javax.swing.text.DocumentFilter;
+import javax.swing.text.NavigationFilter;
+import javax.swing.text.Position;
 import java.awt.BorderLayout;
 import java.awt.Dimension;
 import java.awt.Font;
 import java.awt.event.ActionEvent;
 import java.awt.event.InputEvent;
 import java.awt.event.KeyEvent;
+import java.awt.event.MouseAdapter;
+import java.awt.event.MouseEvent;
 import java.util.ArrayDeque;
 import java.util.Arrays;
 import java.util.Deque;
@@ -118,7 +122,7 @@ public final class HexEditorPanel extends JPanel {
         // HEX ≈ Burp Hex — dump (+ continuous when not hexOnly)
         JScrollPane dumpScroll = new JScrollPane(dumpArea);
         dumpScroll.setBorder(new TitledBorder(
-                "Hex Dump — offsets read-only · insert/delete shifts length · Ctrl+Z"));
+                "Hex Dump — address column locked · HEX/ASCII insert/delete shifts length · Ctrl+Z"));
         JPanel hexTab = new JPanel(new BorderLayout(4, 4));
         if (hexOnly) {
             hexTab.add(dumpScroll, BorderLayout.CENTER);
@@ -206,7 +210,7 @@ public final class HexEditorPanel extends JPanel {
             }
         });
 
-        // Dump: block edits in the offset column (addresses are decorative / regenerated).
+        // Dump: offsets are not editable; HEX / ASCII columns may insert/delete (length shifts).
         ((AbstractDocument) dumpArea.getDocument()).setDocumentFilter(new DocumentFilter() {
             @Override
             public void insertString(FilterBypass fb, int offset, String string, AttributeSet attr)
@@ -221,12 +225,12 @@ public final class HexEditorPanel extends JPanel {
                     return;
                 }
                 String doc = fb.getDocument().getText(0, fb.getDocument().getLength());
-                if (touchesOffsetColumn(doc, offset, length)) {
-                    int hexStart = HexUtils.dumpHexColumnStart(doc, offset);
-                    dumpArea.setCaretPosition(clamp(hexStart, doc.length()));
+                int[] clipped = clipDumpEditRange(doc, offset, length);
+                if (clipped == null) {
+                    snapCaretOutOfOffset(doc, offset);
                     return;
                 }
-                super.remove(fb, offset, length);
+                super.remove(fb, clipped[0], clipped[1]);
             }
 
             @Override
@@ -237,32 +241,110 @@ public final class HexEditorPanel extends JPanel {
                     return;
                 }
                 String doc = fb.getDocument().getText(0, fb.getDocument().getLength());
-                if (touchesOffsetColumn(doc, offset, Math.max(length, text == null ? 0 : 1))) {
+                int[] clipped = clipDumpEditRange(doc, offset, Math.max(length, 0));
+                if (clipped == null) {
+                    // Pure offset edit (or caret in offset with empty selection): bounce to HEX.
                     int hexStart = HexUtils.dumpHexColumnStart(doc, offset);
-                    dumpArea.setCaretPosition(clamp(hexStart, doc.length()));
-                    // If selection was only in offset, ignore; otherwise apply at hex start.
-                    if (length > 0 && text != null && !text.isEmpty()
-                            && !HexUtils.isDumpCaretInOffsetColumn(doc, offset)) {
+                    if (text != null && !text.isEmpty()) {
                         super.replace(fb, hexStart, 0, text, attrs);
+                        return;
                     }
+                    snapCaretOutOfOffset(doc, offset);
                     return;
                 }
-                super.replace(fb, offset, length, text, attrs);
+                super.replace(fb, clipped[0], clipped[1], text, attrs);
+            }
+        });
+
+        // Prevent caret/selection from landing on the address column.
+        dumpArea.setNavigationFilter(new NavigationFilter() {
+            @Override
+            public void setDot(FilterBypass fb, int dot, Position.Bias bias) {
+                fb.setDot(avoidDumpOffset(dumpArea.getText(), dot), bias);
             }
 
-            private boolean touchesOffsetColumn(String doc, int offset, int length) {
-                if (HexUtils.isDumpCaretInOffsetColumn(doc, offset)) {
-                    return true;
-                }
-                if (length <= 0) {
-                    return false;
-                }
-                int end = Math.min(doc.length(), offset + length - 1);
-                return HexUtils.isDumpCaretInOffsetColumn(doc, end);
+            @Override
+            public void moveDot(FilterBypass fb, int dot, Position.Bias bias) {
+                fb.moveDot(avoidDumpOffset(dumpArea.getText(), dot), bias);
+            }
+        });
+        dumpArea.addMouseListener(new MouseAdapter() {
+            @Override
+            public void mousePressed(MouseEvent e) {
+                SwingUtilities.invokeLater(() -> {
+                    String doc = dumpArea.getText();
+                    int caret = dumpArea.getCaretPosition();
+                    if (HexUtils.isDumpCaretInOffsetColumn(doc, caret)) {
+                        dumpArea.setCaretPosition(avoidDumpOffset(doc, caret));
+                    }
+                });
+            }
+
+            @Override
+            public void mouseReleased(MouseEvent e) {
+                SwingUtilities.invokeLater(() -> {
+                    String doc = dumpArea.getText();
+                    int dot = dumpArea.getCaret().getDot();
+                    int mark = dumpArea.getCaret().getMark();
+                    if (HexUtils.isDumpCaretInOffsetColumn(doc, dot)
+                            || HexUtils.isDumpCaretInOffsetColumn(doc, mark)) {
+                        dumpArea.setCaretPosition(avoidDumpOffset(doc, dot));
+                    }
+                });
             }
         });
 
         // ASCII pane: free insert/delete (length follows text).
+    }
+
+    /** Snap document position out of the dump address column onto HEX digits. */
+    private static int avoidDumpOffset(String doc, int pos) {
+        if (doc == null || doc.isEmpty()) {
+            return 0;
+        }
+        int safe = clamp(pos, doc.length());
+        if (HexUtils.isDumpCaretInOffsetColumn(doc, safe)) {
+            return clamp(HexUtils.dumpHexColumnStart(doc, safe), doc.length());
+        }
+        return safe;
+    }
+
+    private void snapCaretOutOfOffset(String doc, int offset) {
+        dumpArea.setCaretPosition(avoidDumpOffset(doc, offset));
+    }
+
+    /**
+     * If the edit range is entirely inside an address column, return null (reject).
+     * If it starts inside an address, clip the start to the HEX column so delete/type
+     * still works on the selected HEX/ASCII bytes.
+     */
+    private static int[] clipDumpEditRange(String doc, int offset, int length) {
+        if (doc == null) {
+            return new int[]{0, 0};
+        }
+        int start = clamp(offset, doc.length());
+        int end = clamp(offset + Math.max(length, 0), doc.length());
+        if (start >= end) {
+            if (HexUtils.isDumpCaretInOffsetColumn(doc, start)) {
+                return null;
+            }
+            return new int[]{start, 0};
+        }
+        boolean startInOffset = HexUtils.isDumpCaretInOffsetColumn(doc, start);
+        boolean endInOffset = HexUtils.isDumpCaretInOffsetColumn(doc, Math.max(start, end - 1));
+        if (startInOffset && endInOffset
+                && HexUtils.dumpHexColumnStart(doc, start) == HexUtils.dumpHexColumnStart(doc, end - 1)
+                && end <= HexUtils.dumpHexColumnStart(doc, start)) {
+            // Selection only covers the address on one line.
+            return null;
+        }
+        if (startInOffset) {
+            start = HexUtils.dumpHexColumnStart(doc, start);
+        }
+        if (start >= end) {
+            return null;
+        }
+        return new int[]{start, end - start};
     }
 
     private DocumentListener track(EditSource source) {

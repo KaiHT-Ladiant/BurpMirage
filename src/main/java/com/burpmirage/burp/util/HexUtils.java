@@ -115,12 +115,15 @@ public final class HexUtils {
                 lineBytes.add((byte) Integer.parseInt(m.group(1), 16));
             }
             if (asciiPart != null) {
-                // ASCII column length drives the line: shorter → drop trailing bytes (shift),
-                // longer → append bytes. '.' keeps non-printable hex; otherwise write the char.
-                while (lineBytes.size() > asciiPart.length()) {
+                // toHexDump pads the ASCII column to 16 with trailing spaces. Those pads must
+                // not inflate length. User delete (shorter) / insert (longer or typed into pad)
+                // must push/pull the byte buffer.
+                int hexCount = lineBytes.size();
+                int dataLen = asciiDataLength(asciiPart, hexCount);
+                while (lineBytes.size() > dataLen) {
                     lineBytes.remove(lineBytes.size() - 1);
                 }
-                while (lineBytes.size() < asciiPart.length()) {
+                while (lineBytes.size() < dataLen) {
                     lineBytes.add((byte) 0x2E);
                 }
                 for (int i = 0; i < lineBytes.size(); i++) {
@@ -172,6 +175,31 @@ public final class HexUtils {
             out[i] = bytes.get(i);
         }
         return out;
+    }
+
+    /**
+     * Effective ASCII-column data length for one dump line.
+     * Ignores trailing display padding spaces beyond {@code hexCount}; honors user
+     * insert/delete so the buffer can grow or shrink.
+     */
+    static int asciiDataLength(String asciiPart, int hexCount) {
+        if (asciiPart == null) {
+            return hexCount;
+        }
+        int len = asciiPart.length();
+        if (len < hexCount) {
+            return len; // user deleted → shrink
+        }
+        if (len > 16) {
+            return len; // user inserted past the fixed column → grow
+        }
+        // len in [hexCount, 16]: ignore trailing spaces that are only display padding,
+        // but keep bytes the user typed into the former pad zone.
+        int last = len - 1;
+        while (last >= hexCount && asciiPart.charAt(last) == ' ') {
+            last--;
+        }
+        return last + 1;
     }
 
     /** True if caret sits in the ASCII column of a hex-dump line ({@code " |...|"}). */
