@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import argparse
 import base64
+import builtins
+import io
 import json
 import os
 import socket
@@ -19,13 +21,77 @@ import threading
 import time
 from typing import Any, Dict, Optional
 
-# Unbuffered logs when spawned from Burp
+# Unbuffered + UTF-8 logs when spawned from Burp.
+# Korean Windows consoles default to cp949, which cannot encode —, …, etc.
+# and would crash Frida's on_message thread (UnicodeEncodeError).
 os.environ.setdefault("PYTHONUNBUFFERED", "1")
-try:
-    sys.stdout.reconfigure(line_buffering=True)  # type: ignore[attr-defined]
-    sys.stderr.reconfigure(line_buffering=True)  # type: ignore[attr-defined]
-except Exception:
-    pass
+os.environ.setdefault("PYTHONIOENCODING", "utf-8")
+
+
+def _configure_stdio() -> None:
+    for name in ("stdout", "stderr"):
+        stream = getattr(sys, name, None)
+        if stream is None:
+            continue
+        try:
+            stream.reconfigure(  # type: ignore[attr-defined]
+                encoding="utf-8",
+                errors="replace",
+                line_buffering=True,
+            )
+            continue
+        except Exception:
+            pass
+        try:
+            buf = getattr(stream, "buffer", None)
+            if buf is None:
+                continue
+            setattr(
+                sys,
+                name,
+                io.TextIOWrapper(
+                    buf,
+                    encoding="utf-8",
+                    errors="replace",
+                    line_buffering=True,
+                    write_through=True,
+                ),
+            )
+        except Exception:
+            pass
+
+
+_configure_stdio()
+
+_builtin_print = builtins.print
+
+
+def print(*args: Any, **kwargs: Any) -> None:  # noqa: A001 - shadow builtins intentionally
+    """Never raise UnicodeEncodeError when logging to the Burp host pipe."""
+    kwargs.setdefault("flush", True)
+    try:
+        _builtin_print(*args, **kwargs)
+        return
+    except UnicodeEncodeError:
+        pass
+    except Exception:
+        return
+    file = kwargs.get("file", sys.stdout) or sys.stdout
+    sep = kwargs.get("sep", " ")
+    end = kwargs.get("end", "\n")
+    text = sep.join(str(a) for a in args) + end
+    enc = getattr(file, "encoding", None) or "utf-8"
+    raw = text.encode(enc, errors="replace")
+    try:
+        buf = getattr(file, "buffer", None)
+        if buf is not None:
+            buf.write(raw)
+            buf.flush()
+        else:
+            _builtin_print(raw.decode(enc, errors="replace"), file=file, end="", flush=True)
+    except Exception:
+        pass
+
 
 try:
     import frida
@@ -103,7 +169,7 @@ class BurpBridge:
                 remaining = deadline - time.time()
                 if remaining <= 0:
                     self._pending.pop(packet_id, None)
-                    print(f"[!] Decision timeout for {packet_id} — auto-forward", flush=True)
+                    print(f"[!] Decision timeout for {packet_id} - auto-forward")
                     return {"action": "forward", "data": list(data_bytes)}
                 self._pending_cv.wait(timeout=min(remaining, 1.0))
             result = self._pending.pop(
@@ -381,7 +447,7 @@ def main() -> int:
 
     attached_pids: list[int] = []
     for pid in pids:
-        print(f"[*] Attaching to PID {pid}…", flush=True)
+        print(f"[*] Attaching to PID {pid}...")
         try:
             session = attach_pid(pid)
         except Exception as e:
@@ -412,7 +478,7 @@ def main() -> int:
         bridge.close()
         return 3
 
-    print(f"[*] Hooked PIDs {attached_pids}. Waiting for traffic…", flush=True)
+    print(f"[*] Hooked PIDs {attached_pids}. Waiting for traffic...")
     bridge.send_event(f"hooked pids={attached_pids}")
 
     def _exports_inject(script: Any, byte_list, peer, wait_response, request_id) -> Any:
@@ -464,7 +530,7 @@ def main() -> int:
         if cleaned.is_set():
             return
         cleaned.set()
-        print(f"[*] Cleaning up Frida sessions ({reason})…", flush=True)
+        print(f"[*] Cleaning up Frida sessions ({reason})...")
         for script in scripts:
             try:
                 script.unload()
@@ -517,7 +583,7 @@ def main() -> int:
             time.sleep(0.5)
     except KeyboardInterrupt:
         exit_reason = "keyboard"
-        print("[*] Detaching (KeyboardInterrupt)…", flush=True)
+        print("[*] Detaching (KeyboardInterrupt)...")
     finally:
         if exit_reason == "burp_detach" or bridge.detach_requested:
             exit_reason = "burp_detach"

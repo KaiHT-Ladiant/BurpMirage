@@ -441,17 +441,17 @@ function detectAndAnnounce() {
   var chromium = detectChromiumFamily();
   var hint;
   if (chromium) {
-    hint = 'Chromium/CEF (' + chromium + ') — use Inject Group (Renderer/Main/NetworkService). '
+    hint = 'Chromium/CEF (' + chromium + ') - use Inject Group (Renderer/Main/NetworkService). '
         + 'Single NetworkService is often empty (sockets may live on Renderer). '
         + 'Mode A WinHTTP is usually ineffective here; Mode B hooks send+WriteFile.';
   } else if ((winhttp || wininet) && ws2) {
-    hint = 'HTTP stack + Winsock detected — recommend Mode A+B (both ON)';
+    hint = 'HTTP stack + Winsock detected - recommend Mode A+B (both ON)';
   } else if (winhttp || wininet) {
-    hint = 'WinHTTP/WinInet detected — recommend Mode A (Burp Proxy Force)';
+    hint = 'WinHTTP/WinInet detected - recommend Mode A (Burp Proxy Force)';
   } else if (ws2) {
-    hint = 'Winsock only — recommend Mode B (Mirage Socket Intercept)';
+    hint = 'Winsock only - recommend Mode B (Mirage Socket Intercept)';
   } else {
-    hint = 'No WinHTTP/WinInet/ws2_32 yet — hooks will attach when modules load';
+    hint = 'No WinHTTP/WinInet/ws2_32 yet - hooks will attach when modules load';
   }
   send({
     type: 'event',
@@ -810,7 +810,7 @@ function installTlsUnpin() {
 
   send({
     type: 'event',
-    message: 'Mode C TLS Unpin armed — boringSslExports=' + boring
+    message: 'Mode C TLS Unpin armed - boringSslExports=' + boring
         + ' CertVerifyChain=' + schannel
         + ' WinVerifyTrust=' + wintrust
         + ' | Chromium: use Inject Group (Renderer/Main/NetworkService); pin/custom-verify bypassed when hooked'
@@ -1289,7 +1289,7 @@ function install() {
     installTlsUnpin();
   }
   if (!modeProxyForce && !modeSocketMirage && !modeTlsUnpin) {
-    send({ type: 'event', message: 'WARNING: Mode A/B/C all OFF — nothing hooked' });
+    send({ type: 'event', message: 'WARNING: Mode A/B/C all OFF - nothing hooked' });
   }
 }
 
