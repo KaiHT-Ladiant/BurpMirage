@@ -29,6 +29,7 @@ os.environ.setdefault("PYTHONIOENCODING", "utf-8")
 
 
 def _configure_stdio() -> None:
+    """Prefer reconfigure(); never nest TextIOWrapper (PyInstaller shutdown crash)."""
     for name in ("stdout", "stderr"):
         stream = getattr(sys, name, None)
         if stream is None:
@@ -42,6 +43,10 @@ def _configure_stdio() -> None:
             continue
         except Exception:
             pass
+        # Nested TextIOWrapper shares the same buffer lock and triggers
+        # Fatal Python error: _enter_buffered_busy at interpreter shutdown.
+        if isinstance(stream, io.TextIOWrapper):
+            continue
         try:
             buf = getattr(stream, "buffer", None)
             if buf is None:
@@ -64,33 +69,43 @@ def _configure_stdio() -> None:
 _configure_stdio()
 
 _builtin_print = builtins.print
+_print_lock = threading.Lock()
+_SHUTTING_DOWN = False
+
+
+def _raw_fd_write(text: str, *, to_stderr: bool = False) -> None:
+    try:
+        os.write(2 if to_stderr else 1, text.encode("utf-8", errors="replace"))
+    except Exception:
+        pass
+
+
+def begin_shutdown() -> None:
+    """Stop using TextIO wrappers — daemon Frida threads may still log during exit."""
+    global _SHUTTING_DOWN
+    _SHUTTING_DOWN = True
 
 
 def print(*args: Any, **kwargs: Any) -> None:  # noqa: A001 - shadow builtins intentionally
-    """Never raise UnicodeEncodeError when logging to the Burp host pipe."""
-    kwargs.setdefault("flush", True)
-    try:
-        _builtin_print(*args, **kwargs)
-        return
-    except UnicodeEncodeError:
-        pass
-    except Exception:
-        return
-    file = kwargs.get("file", sys.stdout) or sys.stdout
+    """Safe under cp949 consoles and interpreter finalization (no Fatal Python abort)."""
     sep = kwargs.get("sep", " ")
     end = kwargs.get("end", "\n")
     text = sep.join(str(a) for a in args) + end
-    enc = getattr(file, "encoding", None) or "utf-8"
-    raw = text.encode(enc, errors="replace")
+    file = kwargs.get("file", sys.stdout) or sys.stdout
+    to_stderr = file is sys.stderr
+
+    if _SHUTTING_DOWN:
+        _raw_fd_write(text, to_stderr=to_stderr)
+        return
+
+    kwargs.setdefault("flush", True)
     try:
-        buf = getattr(file, "buffer", None)
-        if buf is not None:
-            buf.write(raw)
-            buf.flush()
-        else:
-            _builtin_print(raw.decode(enc, errors="replace"), file=file, end="", flush=True)
+        with _print_lock:
+            _builtin_print(*args, **kwargs)
+        return
     except Exception:
         pass
+    _raw_fd_write(text, to_stderr=to_stderr)
 
 
 try:
@@ -116,6 +131,7 @@ class BurpBridge:
         self._detach_handler = None
         self.alive = False
         self.detach_requested = False
+        self._reader: Optional[threading.Thread] = None
 
     def connect(self, retries: int = 40) -> None:
         last_err: Optional[Exception] = None
@@ -130,7 +146,10 @@ class BurpBridge:
                 s.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
                 self.sock = s
                 self.alive = True
-                t = threading.Thread(target=self._read_loop, name="burp-bridge-reader", daemon=True)
+                t = threading.Thread(
+                    target=self._read_loop, name="burp-bridge-reader", daemon=True
+                )
+                self._reader = t
                 t.start()
                 print(f"[*] Connected to Burp bridge {self.host}:{self.port}", flush=True)
                 return
@@ -204,10 +223,13 @@ class BurpBridge:
                 msg = str(e).lower()
                 if "timed out" in msg or "timeout" in msg:
                     continue
-                print(f"[!] Bridge recv error: {e}", flush=True)
+                # WinError 10038 / EBADF after close() — expected during detach.
+                if self.alive and not _SHUTTING_DOWN:
+                    print(f"[!] Bridge recv error: {e}", flush=True)
                 break
             if not chunk:
-                print("[!] Bridge peer closed connection", flush=True)
+                if self.alive and not _SHUTTING_DOWN:
+                    print("[!] Bridge peer closed connection", flush=True)
                 break
             buf += chunk
             while b"\n" in buf:
@@ -222,8 +244,10 @@ class BurpBridge:
                     self._handle_server_message(msg)
                 except Exception as e:
                     print(f"[!] Server message handler error: {e}", flush=True)
+        was_alive = self.alive
         self.alive = False
-        print("[*] Bridge reader stopped", flush=True)
+        if was_alive and not _SHUTTING_DOWN:
+            print("[*] Bridge reader stopped", flush=True)
 
     def _handle_server_message(self, msg: Dict[str, Any]) -> None:
         mtype = msg.get("type")
@@ -280,16 +304,25 @@ class BurpBridge:
 
     def close(self) -> None:
         self.alive = False
-        if self.sock:
+        sock = self.sock
+        self.sock = None
+        if sock is not None:
             try:
-                self.sock.shutdown(socket.SHUT_RDWR)
+                sock.shutdown(socket.SHUT_RDWR)
             except OSError:
                 pass
             try:
-                self.sock.close()
+                sock.close()
             except OSError:
                 pass
-            self.sock = None
+        reader = self._reader
+        if (
+            reader is not None
+            and reader.is_alive()
+            and reader is not threading.current_thread()
+        ):
+            reader.join(timeout=1.5)
+        self._reader = None
 
 
 def _bundled_hooks_path() -> Optional[str]:
@@ -475,6 +508,7 @@ def main() -> int:
         print(f"[*] Hooked PID {pid}", flush=True)
 
     if not attached_pids:
+        begin_shutdown()
         bridge.close()
         return 3
 
@@ -530,6 +564,7 @@ def main() -> int:
         if cleaned.is_set():
             return
         cleaned.set()
+        begin_shutdown()
         print(f"[*] Cleaning up Frida sessions ({reason})...")
         for script in scripts:
             try:
@@ -587,6 +622,7 @@ def main() -> int:
     finally:
         if exit_reason == "burp_detach" or bridge.detach_requested:
             exit_reason = "burp_detach"
+        begin_shutdown()
         print(f"[*] Cleaning up (reason={exit_reason})", flush=True)
         cleanup_frida(exit_reason)
         bridge.close()

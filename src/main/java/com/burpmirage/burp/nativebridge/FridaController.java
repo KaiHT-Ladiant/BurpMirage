@@ -17,14 +17,20 @@ import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+import java.util.stream.Collectors;
 
 /**
  * Launches the Python Frida host that attaches to a target process and
@@ -162,6 +168,12 @@ public final class FridaController implements AutoCloseable {
         watchHost(proc, processes, pidCsv.toString(), python);
     }
 
+    private static final Pattern HOOKED_PID = Pattern.compile(
+            "(?i)hooked\\s+pid\\s+(\\d+)");
+    private static final Pattern ATTACH_FAILED_PID = Pattern.compile(
+            "(?i)(?:attach\\s+failed|unable to access process with pid|failed to attach)"
+                    + "[^\\d]*(\\d+)");
+
     /**
      * Older burpmirage-bridge.exe is single-PID; group inject starts one host per target.
      * BridgeServer already accepts multiple Frida TCP clients.
@@ -172,14 +184,33 @@ public final class FridaController implements AutoCloseable {
             List<ProcessInfo> processes,
             String pidCsv
     ) throws IOException, InterruptedException {
-        status("Group inject via " + processes.size()
-                + " standalone bridge hosts (one PID each): " + pidCsv);
+        List<ProcessInfo> candidates = new ArrayList<>();
+        for (ProcessInfo p : processes) {
+            boolean alive = ProcessHandle.of(p.pid()).map(ProcessHandle::isAlive).orElse(false);
+            if (!alive) {
+                logging.logToOutput("[BurpMirage] Skip dead PID " + p.pid());
+                status("Skip dead PID " + p.pid());
+            } else {
+                candidates.add(p);
+            }
+        }
+        if (candidates.isEmpty()) {
+            throw new IOException("No live processes to inject (all PIDs dead): " + pidCsv);
+        }
+
+        String candidateCsv = candidates.stream()
+                .map(p -> Integer.toString(p.pid()))
+                .collect(Collectors.joining(","));
+        status("Group inject via " + candidates.size()
+                + " standalone bridge hosts (one PID each): " + candidateCsv);
+
         List<Process> started = new ArrayList<>();
-        CountDownLatch ready = new CountDownLatch(1);
-        AtomicBoolean success = new AtomicBoolean(false);
+        Set<Integer> hookedPids = ConcurrentHashMap.newKeySet();
+        Set<Integer> failedPids = ConcurrentHashMap.newKeySet();
+        AtomicInteger decided = new AtomicInteger(0);
         List<String> lines = new CopyOnWriteArrayList<>();
 
-        for (ProcessInfo p : processes) {
+        for (ProcessInfo p : candidates) {
             List<String> cmd = List.of(
                     bridgeExe.toAbsolutePath().toString(),
                     "--pid", Integer.toString(p.pid()),
@@ -190,25 +221,35 @@ public final class FridaController implements AutoCloseable {
             logging.logToOutput("[BurpMirage] Launch: " + String.join(" ", cmd));
             Process proc = startHostProcess(cmd);
             started.add(proc);
-            ioPool.submit(() -> drainHostOutput(proc, lines, ready, success));
-            ioPool.submit(() -> awaitHostExit(proc, ready));
+            ioPool.submit(() -> drainFanoutHost(
+                    proc, p.pid(), lines, hookedPids, failedPids, decided));
         }
 
         hostProcess.set(started.get(0));
         for (int i = 1; i < started.size(); i++) {
             extraHosts.add(started.get(i));
         }
-        ProcessInfo primary = processes.get(0);
-        attached.set(primary);
-        attachedGroup.set(List.copyOf(processes));
 
-        boolean signaled = ready.await(25, TimeUnit.SECONDS);
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(30);
+        while (decided.get() < candidates.size() && System.nanoTime() < deadline) {
+            Thread.sleep(100);
+        }
+
+        List<ProcessInfo> ok = candidates.stream()
+                .filter(p -> hookedPids.contains(p.pid()))
+                .toList();
         boolean anyAlive = started.stream().anyMatch(Process::isAlive);
-        if (!anyAlive) {
+
+        if (ok.isEmpty()) {
             attached.set(null);
             attachedGroup.set(List.of());
             hostProcess.set(null);
             extraHosts.clear();
+            for (Process proc : started) {
+                if (proc.isAlive()) {
+                    proc.destroyForcibly();
+                }
+            }
             String tail = String.join("\n", lines.size() > 30
                     ? lines.subList(lines.size() - 30, lines.size()) : lines);
             throw new IOException(I18n.format(
@@ -218,10 +259,95 @@ public final class FridaController implements AutoCloseable {
                     tail.isBlank() ? "(empty)" : tail
             ));
         }
-        if (!signaled || !success.get()) {
-            status(I18n.format("frida.status.waiting", primary.name()));
+
+        attached.set(ok.get(0));
+        attachedGroup.set(List.copyOf(ok));
+        String okCsv = ok.stream()
+                .map(p -> Integer.toString(p.pid()))
+                .collect(Collectors.joining(","));
+        if (ok.size() < candidates.size() || candidates.size() < processes.size()) {
+            status(I18n.format(
+                    "frida.status.hooked_group_partial",
+                    ok.size(),
+                    processes.size(),
+                    okCsv
+            ));
+        } else if (!anyAlive) {
+            // All hooked then exited (unusual) — still report what hooked.
+            status(I18n.format("frida.status.hooked_group", ok.size(), okCsv));
         } else {
-            status(I18n.format("frida.status.hooked_group", processes.size(), pidCsv));
+            status(I18n.format("frida.status.hooked_group", ok.size(), okCsv));
+        }
+    }
+
+    private void drainFanoutHost(
+            Process proc,
+            int expectedPid,
+            List<String> lines,
+            Set<Integer> hookedPids,
+            Set<Integer> failedPids,
+            AtomicInteger decided
+    ) {
+        AtomicBoolean counted = new AtomicBoolean(false);
+        try (BufferedReader reader = new BufferedReader(
+                new InputStreamReader(proc.getInputStream(), StandardCharsets.UTF_8))) {
+            String line;
+            while ((line = reader.readLine()) != null) {
+                lines.add(line);
+                logging.logToOutput("[FridaHost] " + line);
+                statusListener.accept(line);
+                markFanoutLine(line, expectedPid, hookedPids, failedPids, decided, counted);
+            }
+        } catch (IOException e) {
+            logging.logToError("Frida host IO: " + e.getMessage());
+        } finally {
+            try {
+                int code = proc.waitFor();
+                status("Frida host exited (code=" + code + ")");
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+            hostProcess.compareAndSet(proc, null);
+            extraHosts.remove(proc);
+            if (counted.compareAndSet(false, true)) {
+                failedPids.add(expectedPid);
+                decided.incrementAndGet();
+            }
+        }
+    }
+
+    private static void markFanoutLine(
+            String line,
+            int expectedPid,
+            Set<Integer> hookedPids,
+            Set<Integer> failedPids,
+            AtomicInteger decided,
+            AtomicBoolean counted
+    ) {
+        Matcher hooked = HOOKED_PID.matcher(line);
+        if (hooked.find()) {
+            int pid = Integer.parseInt(hooked.group(1));
+            if (pid == expectedPid && hookedPids.add(pid) && counted.compareAndSet(false, true)) {
+                decided.incrementAndGet();
+            }
+            return;
+        }
+        Matcher failed = ATTACH_FAILED_PID.matcher(line);
+        if (failed.find()) {
+            int pid = Integer.parseInt(failed.group(1));
+            if (pid == expectedPid && failedPids.add(pid) && counted.compareAndSet(false, true)) {
+                decided.incrementAndGet();
+            }
+            return;
+        }
+        String lower = line.toLowerCase();
+        if (lower.contains("unable to access process")
+                || lower.contains("access denied")
+                || lower.contains("script.load failed")
+                || lower.contains("attach failed")) {
+            if (failedPids.add(expectedPid) && counted.compareAndSet(false, true)) {
+                decided.incrementAndGet();
+            }
         }
     }
 
@@ -295,8 +421,9 @@ public final class FridaController implements AutoCloseable {
                 logging.logToOutput("[FridaHost] " + line);
                 statusListener.accept(line);
                 String lower = line.toLowerCase();
+                // Do NOT treat "connected to burp bridge" as inject success —
+                // attach can still fail right after the TCP hello.
                 if (lower.contains("hooked pid") || lower.contains("hooked pids")
-                        || lower.contains("connected to burp bridge")
                         || lower.contains("winsock hooks installed")
                         || lower.contains("writefile/readfile hooks")
                         || lower.contains("attached to pid")) {
@@ -307,7 +434,8 @@ public final class FridaController implements AutoCloseable {
                         || lower.contains("could not connect")
                         || lower.contains("unable to access process")
                         || lower.contains("access denied")
-                        || lower.contains("failed to attach")) {
+                        || lower.contains("failed to attach")
+                        || lower.contains("attach failed")) {
                     ready.countDown();
                 }
             }

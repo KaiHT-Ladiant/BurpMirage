@@ -320,16 +320,36 @@ public final class ProcessSelectorPanel extends JPanel {
             protected void done() {
                 try {
                     get();
-                    onAttached.accept(seed);
-                    if (finalTargets.size() == 1) {
-                        String role = seed.role();
+                    List<ProcessInfo> hooked = fridaController.attachedGroup();
+                    if (hooked == null || hooked.isEmpty()) {
+                        hooked = List.of(seed);
+                    }
+                    ProcessInfo primary = hooked.get(0);
+                    onAttached.accept(primary);
+                    if (hooked.size() == 1) {
+                        String role = primary.role();
                         if (!role.isBlank()) {
-                            statusLabel.setText(I18n.format("process.hooked_role", seed.name(), seed.pid(), role));
+                            statusLabel.setText(I18n.format(
+                                    "process.hooked_role", primary.name(), primary.pid(), role));
                         } else {
-                            statusLabel.setText(I18n.format("process.hooked", seed.name(), seed.pid()));
+                            statusLabel.setText(I18n.format(
+                                    "process.hooked", primary.name(), primary.pid()));
                         }
                     } else {
-                        statusLabel.setText(I18n.format("process.hooked_group", finalTargets.size(), pidList));
+                        String hookedList = hooked.stream()
+                                .map(p -> p.pid() + (p.role().isBlank() ? "" : "/" + p.role()))
+                                .reduce((a, b) -> a + ", " + b)
+                                .orElse("");
+                        if (hooked.size() < finalTargets.size()) {
+                            statusLabel.setText(I18n.format(
+                                    "process.hooked_group_partial",
+                                    hooked.size(),
+                                    finalTargets.size(),
+                                    hookedList));
+                        } else {
+                            statusLabel.setText(I18n.format(
+                                    "process.hooked_group", hooked.size(), hookedList));
+                        }
                     }
                 } catch (Exception e) {
                     statusLabel.setText(I18n.get("process.inject_failed"));
