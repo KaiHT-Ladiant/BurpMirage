@@ -1,5 +1,10 @@
 package com.burpmirage.burp.util;
 
+import java.nio.ByteBuffer;
+import java.nio.charset.CharacterCodingException;
+import java.nio.charset.Charset;
+import java.nio.charset.CharsetDecoder;
+import java.nio.charset.CodingErrorAction;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -255,6 +260,21 @@ public final class HexUtils {
         if (data == null) {
             return "";
         }
+        if (max <= 0) {
+            return "";
+        }
+        // Prefer charset-aware decode so Korean/UTF-8 is readable in History/meta.
+        if (looksLikeHttpMessage(data) || isValidUtf8(data)) {
+            String decoded = decodeForDisplay(data)
+                    .replace('\r', ' ')
+                    .replace('\n', ' ')
+                    .replaceAll("\\s+", " ")
+                    .trim();
+            if (decoded.length() > max) {
+                return decoded.substring(0, max) + "…";
+            }
+            return decoded;
+        }
         int n = Math.min(data.length, max);
         StringBuilder sb = new StringBuilder(n);
         for (int i = 0; i < n; i++) {
@@ -267,13 +287,156 @@ public final class HexUtils {
         return sb.toString();
     }
 
+    /**
+     * Decode packet bytes for Info / ASCII text views.
+     * HTTP: headers as ISO-8859-1, body via {@code Content-Type} charset (default UTF-8 when valid).
+     * Otherwise: UTF-8 when valid, else ISO-8859-1 (binary-safe round-trip).
+     */
+    public static String decodeForDisplay(byte[] data) {
+        if (data == null || data.length == 0) {
+            return "";
+        }
+        if (looksLikeHttpMessage(data)) {
+            return decodeHttpForDisplay(data);
+        }
+        return new String(data, textCharset(data));
+    }
+
+    /**
+     * Re-encode text from Info/ASCII editors back to wire bytes, preserving HTTP header/body charset split.
+     */
+    public static byte[] encodeFromDisplay(String text, byte[] previous) {
+        if (text == null || text.isEmpty()) {
+            return new byte[0];
+        }
+        byte[] base = previous == null ? new byte[0] : previous;
+        if (looksLikeHttpMessage(base) || looksLikeHttpRequestLine(text)) {
+            return encodeHttpFromDisplay(text, base);
+        }
+        return text.getBytes(textCharset(base));
+    }
+
+    /** Charset for a whole non-HTTP buffer, or HTTP body fallback. */
+    public static Charset textCharset(byte[] data) {
+        if (data == null || data.length == 0) {
+            return StandardCharsets.UTF_8;
+        }
+        if (looksLikeHttpMessage(data)) {
+            Charset fromHeader = charsetFromHttpContentType(data);
+            if (fromHeader != null) {
+                return fromHeader;
+            }
+            int sep = indexOfHeaderBodySeparator(data);
+            byte[] body = sep >= 0 ? Arrays.copyOfRange(data, sep + 4, data.length) : data;
+            return isValidUtf8(body) ? StandardCharsets.UTF_8 : StandardCharsets.ISO_8859_1;
+        }
+        return isValidUtf8(data) ? StandardCharsets.UTF_8 : StandardCharsets.ISO_8859_1;
+    }
+
+    public static boolean isValidUtf8(byte[] data) {
+        if (data == null || data.length == 0) {
+            return true;
+        }
+        CharsetDecoder decoder = StandardCharsets.UTF_8.newDecoder()
+                .onMalformedInput(CodingErrorAction.REPORT)
+                .onUnmappableCharacter(CodingErrorAction.REPORT);
+        try {
+            decoder.decode(ByteBuffer.wrap(data));
+            return true;
+        } catch (CharacterCodingException e) {
+            return false;
+        }
+    }
+
+    public static Charset charsetFromHttpContentType(byte[] data) {
+        if (data == null || data.length == 0) {
+            return null;
+        }
+        int sep = indexOfHeaderBodySeparator(data);
+        int headerEnd = sep >= 0 ? sep : Math.min(data.length, 8192);
+        String headers = new String(data, 0, headerEnd, StandardCharsets.ISO_8859_1);
+        return charsetFromContentTypeHeaders(headers);
+    }
+
+    private static Charset charsetFromContentTypeHeaders(String headers) {
+        if (headers == null || headers.isEmpty()) {
+            return null;
+        }
+        Matcher m = Pattern.compile("(?im)^Content-Type:\\s*[^\\r\\n]*charset\\s*=\\s*\"?([\\w.-]+)\"?")
+                .matcher(headers);
+        if (!m.find()) {
+            return null;
+        }
+        try {
+            return Charset.forName(m.group(1).trim());
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    private static String decodeHttpForDisplay(byte[] data) {
+        int sep = indexOfHeaderBodySeparator(data);
+        if (sep < 0) {
+            return new String(data, textCharset(data));
+        }
+        String headers = new String(data, 0, sep + 4, StandardCharsets.ISO_8859_1);
+        Charset bodyCs = charsetFromContentTypeHeaders(headers);
+        if (bodyCs == null) {
+            byte[] bodyBytes = Arrays.copyOfRange(data, sep + 4, data.length);
+            bodyCs = isValidUtf8(bodyBytes) ? StandardCharsets.UTF_8 : StandardCharsets.ISO_8859_1;
+        }
+        String body = new String(data, sep + 4, data.length - sep - 4, bodyCs);
+        return headers + body;
+    }
+
+    private static byte[] encodeHttpFromDisplay(String text, byte[] previous) {
+        int sep = text.indexOf("\r\n\r\n");
+        int delim = 4;
+        if (sep < 0) {
+            sep = text.indexOf("\n\n");
+            delim = 2;
+        }
+        if (sep < 0) {
+            return text.getBytes(textCharset(previous));
+        }
+        String headerBlock = text.substring(0, sep);
+        String body = text.substring(sep + delim);
+        // Normalize header newlines to CRLF for the wire.
+        String normalizedHeaders = headerBlock.replace("\r\n", "\n").replace("\n", "\r\n");
+        Charset bodyCs = charsetFromContentTypeHeaders(normalizedHeaders);
+        if (bodyCs == null) {
+            bodyCs = textCharset(previous);
+        }
+        byte[] headerBytes = (normalizedHeaders + "\r\n\r\n").getBytes(StandardCharsets.ISO_8859_1);
+        byte[] bodyBytes = body.getBytes(bodyCs);
+        byte[] out = new byte[headerBytes.length + bodyBytes.length];
+        System.arraycopy(headerBytes, 0, out, 0, headerBytes.length);
+        System.arraycopy(bodyBytes, 0, out, headerBytes.length, bodyBytes.length);
+        return out;
+    }
+
+    private static boolean looksLikeHttpRequestLine(String text) {
+        if (text == null || text.length() < 12) {
+            return false;
+        }
+        String head = text.length() > 16 ? text.substring(0, 16) : text;
+        return head.startsWith("GET ")
+                || head.startsWith("POST ")
+                || head.startsWith("PUT ")
+                || head.startsWith("HEAD ")
+                || head.startsWith("PATCH ")
+                || head.startsWith("DELETE ")
+                || head.startsWith("OPTIONS ")
+                || head.startsWith("HTTP/1.");
+    }
+
     public static byte[] replaceAscii(byte[] data, String search, String replace) {
         if (data == null || search == null || search.isEmpty()) {
             return data == null ? new byte[0] : data.clone();
         }
-        String hay = new String(data, StandardCharsets.ISO_8859_1);
+        String hay = decodeForDisplay(data);
         String replaced = hay.replace(search, replace == null ? "" : replace);
-        return replaced.getBytes(StandardCharsets.ISO_8859_1);
+        return encodeFromDisplay(replaced, data);
     }
 
     public static byte[] replaceHexPattern(byte[] data, String searchHex, String replaceHex) {

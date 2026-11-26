@@ -29,7 +29,6 @@ import java.awt.Font;
 import java.awt.event.ActionEvent;
 import java.awt.event.InputEvent;
 import java.awt.event.KeyEvent;
-import java.nio.charset.StandardCharsets;
 import java.util.ArrayDeque;
 import java.util.Arrays;
 import java.util.Deque;
@@ -368,7 +367,8 @@ public final class HexEditorPanel extends JPanel {
         try {
             String dump = HexUtils.toHexDump(data);
             String cont = HexUtils.toContinuousHex(data);
-            String ascii = new String(data, StandardCharsets.ISO_8859_1);
+            // Charset-aware (Content-Type / UTF-8) so Korean is not mojibake in Info/ASCII.
+            String ascii = HexUtils.decodeForDisplay(data);
             dumpArea.setText(dump);
             continuousArea.setText(cont);
             asciiArea.setText(ascii);
@@ -385,8 +385,8 @@ public final class HexEditorPanel extends JPanel {
         if (bytes == null || bytes.length == 0) {
             return "";
         }
-        if (HexUtils.looksLikeHttpMessage(bytes)) {
-            return new String(bytes, StandardCharsets.ISO_8859_1);
+        if (HexUtils.looksLikeHttpMessage(bytes) || HexUtils.isValidUtf8(bytes)) {
+            return HexUtils.decodeForDisplay(bytes);
         }
         StringBuilder sb = new StringBuilder(bytes.length);
         for (byte value : bytes) {
@@ -412,7 +412,7 @@ public final class HexEditorPanel extends JPanel {
         byte[] parsed;
         EditSource source = hexOnly ? EditSource.DUMP : lastEdit;
         switch (source) {
-            case ASCII -> parsed = asciiArea.getText().getBytes(StandardCharsets.ISO_8859_1);
+            case ASCII -> parsed = HexUtils.encodeFromDisplay(asciiArea.getText(), previous);
             case CONTINUOUS -> {
                 String cleaned = continuousArea.getText() == null
                         ? ""
