@@ -21,7 +21,8 @@ import java.awt.event.KeyEvent;
  * Root suite-tab UI hosting Process / Intercept / History / PCAP / Repeater / Settings.
  * Suite-wide shortcuts (when focus is inside BurpMirage):
  *   Ctrl+T — Intercept ON/OFF
- *   Ctrl+R — Send to Repeater (Intercept/History) or Send (Repeater tab)
+ *   Ctrl+R — Send to Repeater (new tab)
+ *   Ctrl+Space — Send on active Repeater entry (Burp-style)
  */
 public final class MainPanel extends JPanel {
     private final JTabbedPane tabs = new JTabbedPane();
@@ -109,25 +110,22 @@ public final class MainPanel extends JPanel {
         }
         int code = e.getKeyCode();
 
-        // Ctrl+T — Intercept ON/OFF (BurpMirage-wide)
+        // Ctrl+T — Intercept ON/OFF
         if (code == KeyEvent.VK_T && !shift) {
             SwingUtilities.invokeLater(interceptor::toggleIntercept);
             e.consume();
             return true;
         }
 
-        // Ctrl+R — Send to Repeater, or Send on Repeater tab
+        // Ctrl+R — Send to Repeater (always opens a new entry tab)
         if (code == KeyEvent.VK_R && !shift) {
             Component selected = tabs.getSelectedComponent();
             SwingUtilities.invokeLater(() -> {
-                if (selected == repeaterPanel) {
-                    repeaterPanel.sendRequest();
-                } else if (selected == interceptor) {
+                if (selected == interceptor) {
                     interceptor.sendCurrentToRepeater();
                 } else if (selected == history) {
                     history.sendSelectedToRepeater();
-                } else {
-                    // Other tabs: prefer intercept packet, else history selection
+                } else if (selected != repeaterPanel) {
                     if (!interceptor.sendCurrentToRepeater()) {
                         history.sendSelectedToRepeater();
                     }
@@ -135,6 +133,16 @@ public final class MainPanel extends JPanel {
             });
             e.consume();
             return true;
+        }
+
+        // Ctrl+Space — Send on active Repeater entry (Burp default)
+        if (code == KeyEvent.VK_SPACE && !shift) {
+            if (tabs.getSelectedComponent() == repeaterPanel
+                    || SwingUtilities.isDescendingFrom(focus, repeaterPanel)) {
+                SwingUtilities.invokeLater(repeaterPanel::sendRequest);
+                e.consume();
+                return true;
+            }
         }
 
         return false;

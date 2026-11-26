@@ -32,7 +32,8 @@ import java.util.function.Consumer;
 
 /**
  * Live intercept view — Forward: Ctrl+Shift+F, Drop: Ctrl+D.
- * Suite-wide (MainPanel): Ctrl+T Intercept ON/OFF, Ctrl+R Send to Repeater.
+ * Suite-wide (MainPanel): Ctrl+T Intercept ON/OFF, Ctrl+R Send to Repeater,
+ * Ctrl+Space Repeater Send.
  */
 public final class InterceptorPanel extends JPanel {
     private static final DateTimeFormatter TS =

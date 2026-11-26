@@ -141,7 +141,7 @@ public final class HexEditorPanel extends JPanel {
         tabs.addTab("Info", infoTab);
         tabs.addTab("HEX", hexTab);
         tabs.addTab("ASCII", asciiScroll);
-        tabs.setSelectedIndex(1); // default HEX like Burp hex inspectors often used
+        tabs.setSelectedIndex(0); // default Info (Pretty)
         tabs.addChangeListener(e -> {
             if (!refreshing) {
                 applyFromEditors(true);
